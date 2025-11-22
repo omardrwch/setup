@@ -69,3 +69,6 @@ vim.keymap.set("n", "<C-k>", "<C-w>k", { desc = "Move to window above" })
 vim.keymap.set("n", "<C-l>", "<C-w>l", { desc = "Move to right window" })
 vim.keymap.set("n", "<leader>q", "<C-w>q", { desc = "Close window" })
 
+-- Easier terminal escape (double Esc)
+vim.keymap.set("t", "<Esc><Esc>", "<C-\\><C-n>", { desc = "Exit terminal mode" })
+

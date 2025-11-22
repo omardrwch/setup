@@ -97,6 +97,7 @@
 - `:vs | term` - Open terminal in vertical split
 - `i` or `a` - Enter terminal insert mode (type commands)
 - `Ctrl-\ Ctrl-n` - Exit terminal mode to normal mode
+- `Esc Esc` - Exit terminal mode (press Esc twice)
 - `Ctrl-h/j/k/l` - Navigate between windows (works from terminal)
 
 ## Yazi (File Manager)
@@ -117,4 +118,11 @@
 - `A` - Create new directory
 - `/` - Search in current directory
 - `q` or `Esc` - Close Yazi
+
+## Auto-completion
+- `Tab` / `Shift-Tab` - Next/previous suggestion
+- `Enter` - Accept completion
+- `Ctrl-Space` - Manually trigger completion menu
+- `Ctrl-e` - Close completion menu
+- Completions appear automatically as you type
 
