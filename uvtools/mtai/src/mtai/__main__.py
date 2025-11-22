@@ -17,12 +17,14 @@ def call_ollama(prompt, system_prompt, model=MODEL):
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
+            # {"role": "system", "content": system_prompt},
+            # {"role": "user", "content": prompt}
+            # NOTE(omar): it seems to work better if the system_prompt is given as a user turn.
+            {"role": "user", "content": f"{system_prompt}\n\n{prompt}"}
         ],
         "stream": False
     }
-    
+
     try:
         response = requests.post(OLLAMA_API, json=payload, timeout=120)
         response.raise_for_status()
@@ -112,10 +114,10 @@ Examples:
         sys.exit(1)
     
     prompt = " ".join(args.prompt)
-    
-    # Use the model from args (no need for global)
+
+    # Use the model from args
     model = args.model
-    
+
     # Handle context mode
     if args.context:
         folder_path = Path(args.context).expanduser()
@@ -125,17 +127,21 @@ Examples:
         
         print("Loading folder context...", file=sys.stderr)
         context = get_folder_context(str(folder_path))
-        
-        system_prompt = f"""You are a helpful assistant. The user has provided the following folder context:
+        print( "...loaded!", file=sys.stderr) 
+        system_prompt = f"""You are a helpful assistant with access to the user's files and configuration.
 
-{context}
+    Below is the complete directory structure and file contents from: {folder_path}
 
-Answer their question based on this context. Be concise and helpful."""
-        
+    <folder_context>
+    {context}
+    </folder_context>
+
+    The user will ask you questions about these files. Answer based on the actual content provided above. Be specific and reference the actual files and code when relevant."""
+
         response = call_ollama(prompt, system_prompt, model)
         print(response)
         return
-    
+
     # Handle question mode
     if args.question:
         system_prompt = """You are a helpful terminal/bash expert. Answer questions about terminal commands, shell scripting, and command-line tools. Be concise and clear."""
