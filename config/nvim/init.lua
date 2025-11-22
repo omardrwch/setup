@@ -69,8 +69,3 @@ vim.keymap.set("n", "<C-k>", "<C-w>k", { desc = "Move to window above" })
 vim.keymap.set("n", "<C-l>", "<C-w>l", { desc = "Move to right window" })
 vim.keymap.set("n", "<leader>q", "<C-w>q", { desc = "Close window" })
 
-
-
--- LSP
-vim.lsp.enable("pyright")
-
