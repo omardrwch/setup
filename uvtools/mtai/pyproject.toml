@@ -1,8 +1,7 @@
-
 [project]
 name = "mtai"
 version = "0.0.1"
-description = "Terminal AI assistant powered by Ollama"
+description = "Terminal AI assistant powered by Ollama."
 requires-python = ">=3.8"
 dependencies = [
     "requests>=2.31.0",
