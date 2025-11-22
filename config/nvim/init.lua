@@ -57,6 +57,20 @@ vim.keymap.set("n", "<leader>cd", function()
   vim.notify("📁 Copied directory: " .. dir, vim.log.levels.INFO)
 end, { desc = "Copy file directory to clipboard" })
 
+-- Buffer navigation
+vim.keymap.set("n", "<leader>n", ":bnext<CR>", { desc = "Next buffer" })
+vim.keymap.set("n", "<leader>p", ":bprevious<CR>", { desc = "Previous buffer" })
+vim.keymap.set("n", "<leader>d", ":bdelete<CR>", { desc = "Delete buffer" })
+
+-- Window navigation (easier than Ctrl-w h/j/k/l)
+vim.keymap.set("n", "<C-h>", "<C-w>h", { desc = "Move to left window" })
+vim.keymap.set("n", "<C-j>", "<C-w>j", { desc = "Move to window below" })
+vim.keymap.set("n", "<C-k>", "<C-w>k", { desc = "Move to window above" })
+vim.keymap.set("n", "<C-l>", "<C-w>l", { desc = "Move to right window" })
+vim.keymap.set("n", "<leader>q", "<C-w>q", { desc = "Close window" })
+
+
+
 -- LSP
 vim.lsp.enable("pyright")
 
