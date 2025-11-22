@@ -5,8 +5,11 @@
 
 ## Basic Vim (Built-in)
 - `i` - Insert mode
-- `Esc` - Normal mode
-- `v` - Visual mode
+- `a` - Insert mode (after cursor)
+- `Esc` or `Ctrl-[` - Normal mode
+- `v` - Character-wise visual mode
+- `V` - Line-wise visual mode
+- `Ctrl-v` - Block visual mode
 - `:w` - Save file
 - `:q` - Quit
 - `:wq` or `ZZ` - Save and quit
@@ -18,17 +21,47 @@
 - `b` - Previous word
 - `0` - Start of line
 - `$` - End of line
+- `%` - Jump to matching bracket/parenthesis
 - `gg` - Top of file
 - `G` - Bottom of file
 - `{number}G` - Go to line number
+- `*` - Search for word under cursor (forward)
+- `#` - Search for word under cursor (backward)
+- `n` / `N` - Next/previous search result
 
 ## Editing (Built-in)
-- `yy` - Yank (copy) line
+- `x` - Delete character under cursor
 - `dd` - Delete line
-- `p` - Paste
+- `D` - Delete to end of line
+- `C` - Change to end of line
+- `yy` - Yank (copy) line
+- `p` - Paste after cursor
+- `P` - Paste before cursor
+- `o` - Open new line below
+- `O` - Open new line above
 - `u` - Undo
 - `Ctrl-r` - Redo
 - `.` - Repeat last command
+- `>>` / `<<` - Indent/unindent line
+- `==` - Auto-indent current line
+
+## Visual Mode (Built-in)
+- `v` - Character-wise visual mode
+- `V` - Line-wise visual mode
+- `Ctrl-v` - Block visual mode
+- `y` - Yank selection
+- `d` - Delete selection
+- `p` - Paste
+- `>` / `<` - Indent/unindent selection
+- `=` - Auto-indent selection
+
+## Search & Replace (Built-in)
+- `/pattern` - Search forward
+- `?pattern` - Search backward
+- `n` / `N` - Next/previous match
+- `:%s/old/new/g` - Replace all in file
+- `:%s/old/new/gc` - Replace all with confirmation
+- `:s/old/new/g` - Replace all in line
 
 ## Clipboard (Custom)
 - `<leader>y` - Yank to system clipboard (works with motions)
@@ -90,7 +123,15 @@
 
 ## File Explorer
 - `:e .` - Open netrw (built-in file explorer)
-- Or just use Telescope: `<leader>ff`
+- Or use Telescope: `<leader>ff` (faster)
+- Or use Yazi: `<leader>-` (visual browsing)
+
+### Inside netrw:
+- `Enter` - Open file/directory
+- `-` - Go up a directory
+- `%` - Create new file
+- `d` - Create new directory
+- `D` - Delete file/directory
 
 ## Terminal
 - `:sp | term` - Open terminal in horizontal split
@@ -125,7 +166,6 @@
 - `Ctrl-Space` - Manually trigger completion menu
 - `Ctrl-e` - Close completion menu
 - Completions appear automatically as you type
-
 
 ## Git (Gitsigns)
 ### Visual indicators in gutter:
