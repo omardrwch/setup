@@ -1,0 +1,17 @@
+[project]
+name = "clipboard-tool"
+version = "0.1.0"
+description = "Cross-platform pbcopy/pbpaste wrapper"
+requires-python = ">=3.10"
+
+# Tell setuptools exactly which modules are included
+[project.optional-dependencies]
+build = ["setuptools>=68"]
+
+[tool.setuptools]
+py-modules = ["mycopy", "mypaste"]
+
+[project.scripts]
+mycopy = "mycopy:main"
+mypaste = "mypaste:main"
+
