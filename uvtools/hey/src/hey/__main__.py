@@ -2,9 +2,8 @@
 import sys
 import argparse
 import subprocess
-import json
-from pathlib import Path
 import requests
+import pathlib
 import pyperclip
 
 
@@ -35,10 +34,15 @@ def call_ollama(prompt, system_prompt, model=MODEL):
         sys.exit(1)
 
 
+def get_file_content(file_path):
+    with open(file_path, "r") as f:
+        return f.read()
+
+
 def get_folder_context(folder_path):
     """Get folder contents using tree-content."""
     try:
-        result = subprocess.run(
+        _ = subprocess.run(
             ["tree-content", folder_path, "/tmp/hey-context.txt"],
             capture_output=True,
             text=True,
@@ -120,17 +124,22 @@ Examples:
 
     # Handle context mode
     if args.context:
-        folder_path = Path(args.context).expanduser()
-        if not folder_path.is_dir():
-            print(f"Error: {folder_path} is not a directory", file=sys.stderr)
+        path = pathlib.Path(args.context).expanduser()
+        if path.is_dir():
+            print("Loading folder context...")
+            context = get_folder_context(str(path))
+            print("...loaded")
+        elif path.is_file():
+            print("Loading file content...")
+            context = get_file_content(str(path))
+            print("...loaded")
+        else:
+            print(f"Error: {path} is not a file or directory", file=sys.stderr)
             sys.exit(1)
         
-        print("Loading folder context...", file=sys.stderr)
-        context = get_folder_context(str(folder_path))
-        print( "...loaded!", file=sys.stderr) 
         system_prompt = f"""You are a helpful assistant with access to the user's files and configuration.
 
-    Below is the complete directory structure and file contents from: {folder_path}
+    Below is the complete directory structure and file contents from: {path}
 
     <folder_context>
     {context}
