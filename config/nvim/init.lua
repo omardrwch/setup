@@ -45,7 +45,7 @@ vim.api.nvim_create_autocmd('TextYankPost', {
 
 -- Copy current file name to clipboard
 vim.keymap.set("n", "<leader>cf", function()
-  local filename = vim.fn.expand("%:t")  -- just the file name, like "main.py"
+  local filename = vim.fn.expand("%:p")  -- copy full path
   vim.fn.setreg("+", filename)
   vim.notify("📋 Copied file name: " .. filename, vim.log.levels.INFO)
 end, { desc = "Copy file name to clipboard" })
