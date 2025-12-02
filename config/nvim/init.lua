@@ -45,7 +45,7 @@ vim.api.nvim_create_autocmd('TextYankPost', {
 
 -- Copy current file name to clipboard
 vim.keymap.set("n", "<leader>cf", function()
-  local filename = vim.fn.expand("%:t")  -- just the file name, like "main.py"
+  local filename = vim.fn.expand("%:p")  -- copy full path
   vim.fn.setreg("+", filename)
   vim.notify("📋 Copied file name: " .. filename, vim.log.levels.INFO)
 end, { desc = "Copy file name to clipboard" })
@@ -77,4 +77,21 @@ vim.opt.swapfile = false
 
 -- Quick save
 vim.keymap.set("n", "<leader>w", ":w<CR>", { desc = "Save file" })
+
+-- ================================================================================
+-- Telescope utilities
+-- ================================================================================
+-- Essential: Interactive directory search
+vim.keymap.set('n', '<leader>fd', function()
+  local dir = vim.fn.input("Search in directory: ", vim.fn.getcwd() .. "/", "dir")
+  if dir ~= "" then
+    require('telescope.builtin').live_grep({ cwd = dir })
+  end
+end, { desc = "Find in directory" })
+
+-- Quick shortcut: Search in current file's directory
+vim.keymap.set('n', '<leader>f.', function()
+  require('telescope.builtin').live_grep({ cwd = vim.fn.expand('%:p:h') })
+end, { desc = "Find in current file directory" })
+
 
