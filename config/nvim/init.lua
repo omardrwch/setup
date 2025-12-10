@@ -94,4 +94,12 @@ vim.keymap.set('n', '<leader>f.', function()
   require('telescope.builtin').live_grep({ cwd = vim.fn.expand('%:p:h') })
 end, { desc = "Find in current file directory" })
 
+-- File search with fixed (non-regex strings
+vim.keymap.set('n', '<leader>fs', function()
+  require('telescope.builtin').live_grep({
+    additional_args = function()
+      return { '--fixed-strings' }
+    end
+  })
+end, { desc = 'Search (literal)' })
 
