@@ -4,986 +4,152 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>codexplore</title>
-<style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg-primary: #0c0e14; --bg-secondary: #13161e; --bg-tertiary: #1a1e2a;
-  --bg-hover: #222738; --border: #2a2f40; --border-bright: #3a4060;
-  --text-primary: #e2e6f0; --text-secondary: #8890a8; --text-muted: #585e74;
-  --accent: #6c8cff; --accent-dim: #4a62b8; --accent-bg: rgba(108,140,255,0.08);
-  --hot: #ff6b6b; --warm: #ffaa5c; --mild: #5cdb7a; --cold: #4a8fff;
-  --font-mono: 'JetBrains Mono','Fira Code','SF Mono','Consolas',monospace;
-  --font-sans: 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  --radius: 6px; --transition: 150ms ease;
-}
-html, body { height: 100%; }
-body { font-family: var(--font-sans); background: var(--bg-primary); color: var(--text-primary); overflow: hidden; }
-#app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
-#header { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); gap: 16px; flex-shrink: 0; }
-#header .logo { font-family: var(--font-mono); font-weight: 700; font-size: 15px; color: var(--accent); letter-spacing: -0.5px; white-space: nowrap; }
-#header .logo span { color: var(--text-muted); font-weight: 400; }
-#header .meta { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: right; }
-.controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.controls label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.controls select, .controls button { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; font-size: 12px; font-family: var(--font-mono); cursor: pointer; outline: none; }
-.controls select:hover, .controls button:hover { border-color: var(--border-bright); }
-.toggle-btn { font-size: 11px; }
-.toggle-btn.active { background: var(--accent-bg); border-color: var(--accent-dim); color: var(--accent); }
-#main-wrapper { display: flex; overflow: hidden; height: 100%; }
-#left-panels { display: flex; flex-direction: column; flex: 1; min-width: 300px; overflow: hidden; }
-.panel { display: flex; flex-direction: column; overflow: hidden; min-height: 80px; }
-.panel-header { display: flex; align-items: center; padding: 0 16px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); gap: 4px; flex-shrink: 0; min-height: 36px; }
-.panel-header .tab { padding: 8px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent); border-bottom: 2px solid var(--accent); user-select: none; }
-.panel-header .spacer { flex: 1; }
-.panel-header .info { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
-.panel-body { flex: 1; overflow: auto; position: relative; }
-.h-splitter { height: 5px; background: var(--bg-secondary); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); cursor: row-resize; flex-shrink: 0; }
-.h-splitter:hover, .h-splitter.active { background: var(--accent-dim); }
-.v-splitter { width: 5px; background: var(--bg-secondary); border-left: 1px solid var(--border); border-right: 1px solid var(--border); cursor: col-resize; flex-shrink: 0; display: none; }
-.v-splitter:hover, .v-splitter.active { background: var(--accent-dim); }
-.v-splitter.visible { display: block; }
-#flame-container { width: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; position: relative; }
-#flame-canvas { display: block; position: relative; }
-#flame-tooltip { position: fixed; background: var(--bg-tertiary); border: 1px solid var(--border-bright); border-radius: var(--radius); padding: 8px 12px; font-size: 12px; font-family: var(--font-mono); pointer-events: none; z-index: 100; display: none; max-width: 500px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
-#flame-tooltip .fn-name { color: var(--accent); font-weight: 600; }
-#flame-tooltip .fn-file { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
-#flame-tooltip .fn-time { color: var(--warm); margin-top: 4px; }
-#flame-tooltip .fn-hint { color: var(--text-muted); font-size: 10px; margin-top: 4px; }
-#flame-zoom-indicator { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; overflow: hidden; }
-#flame-zoom-indicator .bc { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); padding: 3px 8px; cursor: pointer; }
-#flame-zoom-indicator .bc:hover { color: var(--text-primary); border-color: var(--border-bright); }
-#flame-zoom-indicator .bc.root { color: var(--accent); }
-#fn-table-container { width: 100%; height: 100%; overflow: auto; }
-.fn-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
-.fn-table thead { position: sticky; top: 0; z-index: 10; }
-.fn-table th { background: var(--bg-tertiary); padding: 8px 12px; text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }
-.fn-table th:hover { color: var(--text-secondary); }
-.fn-table th.sorted { color: var(--accent); }
-.fn-table th.sorted::after { content: ' ▼'; font-size: 9px; }
-.fn-table th.sorted.asc::after { content: ' ▲'; }
-.fn-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fn-table tr { transition: background var(--transition); }
-.fn-table tbody tr:hover, .fn-table tbody tr.hl { background: var(--bg-hover); cursor: pointer; }
-.fn-table .col-self, .fn-table .col-total { text-align: right; font-variant-numeric: tabular-nums; }
-.fn-table .col-name { max-width: 350px; color: var(--text-primary); }
-.fn-table .col-file { max-width: 250px; color: var(--text-muted); font-size: 11px; }
-.heat-bar { display: inline-block; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-#source-panel { display: none; flex-direction: column; background: var(--bg-primary); min-width: 250px; width: 450px; }
-#source-panel.visible { display: flex; }
-#source-panel .panel-header { justify-content: space-between; }
-#source-panel .file-path { font-size: 12px; font-family: var(--font-mono); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-#source-close { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; padding: 2px 6px; border-radius: var(--radius); line-height: 1; }
-#source-close:hover { color: var(--text-primary); background: var(--bg-hover); }
-#source-code { flex: 1; overflow: auto; padding: 8px 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.65; tab-size: 4; }
-.source-line { display: flex; padding: 0 16px 0 0; min-height: 20px; transition: background 80ms ease; }
-.source-line:hover { background: var(--bg-hover); }
-.source-line.highlighted { background: rgba(108,140,255,0.15); }
-.source-line.hot { background: rgba(255,107,107,0.12); }
-.line-no { display: inline-block; width: 50px; text-align: right; padding-right: 16px; color: var(--text-muted); user-select: none; flex-shrink: 0; }
-.line-heat { display: inline-block; width: 90px; text-align: right; padding-right: 12px; font-size: 10px; color: var(--warm); user-select: none; flex-shrink: 0; }
-.line-content { white-space: pre; flex: 1; overflow: hidden; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
-#loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-primary); z-index: 1000; flex-direction: column; gap: 16px; }
-#loading .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-#loading .text { font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); }
-.search-input { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 10px; font-size: 12px; font-family: var(--font-mono); color: var(--text-primary); outline: none; width: 200px; }
-.search-input::placeholder { color: var(--text-muted); }
-.search-input:focus { border-color: var(--accent); }
-</style>
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<div id="loading"><div class="spinner"></div><div class="text">Loading profile…</div></div>
-<div id="app" style="display:none">
-  <div id="header">
-    <div class="logo">codexplore <span>profiler</span></div>
-    <div class="controls">
-      <label>Thread</label>
-      <select id="thread-select"></select>
-      <button class="toggle-btn" id="toggle-view">Timeline</button>
-      <button class="toggle-btn" id="toggle-swimlane" style="display:none">Tasks</button>
-      <button class="toggle-btn" id="toggle-inverted">Bottom-up</button>
-      <button class="toggle-btn active" id="toggle-internals">Hide internals</button>
+<div id="loading" class="loading"><div class="spinner"></div><div class="msg">Loading profile…</div></div>
+
+<div id="app" hidden>
+  <header class="top">
+    <div class="brand"><span class="logo">cx</span>codexplore</div>
+    <div class="target" id="target"></div>
+    <label class="field"><span>Thread</span><select id="thread"></select></label>
+    <label class="field"><span>Frames</span>
+      <select id="frames">
+        <option value="internals">Hide import machinery</option>
+        <option value="all">All frames</option>
+        <option value="collapse">Collapse libraries</option>
+        <option value="mine">My code only</option>
+      </select>
+    </label>
+    <label class="field"><span>Color</span>
+      <select id="color">
+        <option value="module">By module</option>
+        <option value="heat">By self time</option>
+      </select>
+    </label>
+    <div class="search">
+      <input id="search" type="text" placeholder="Search functions or files" spellcheck="false" autocomplete="off">
+      <span class="search-info" id="search-info"></span>
+      <kbd class="search-kbd">/</kbd>
     </div>
-    <div class="meta" id="header-meta"></div>
-  </div>
-  <div id="main-wrapper">
-    <div id="left-panels">
-      <div class="panel" id="panel-flame" style="flex:1">
-        <div class="panel-header">
-          <div class="tab">Flame Graph</div>
-          <div id="flame-zoom-indicator"></div>
-          <div class="spacer"></div>
-          <input type="text" class="search-input" id="flame-search" placeholder="Filter functions / paths…">
-          <div class="info" id="flame-info"></div>
-        </div>
-        <div class="panel-body" id="flame-body">
-          <div id="flame-container">
-            <canvas id="flame-canvas"></canvas>
+    <button class="icon-btn" id="btn-source" title="Toggle source panel (S)">&lt;/&gt;</button>
+    <button class="icon-btn" id="btn-help" title="Keyboard shortcuts (?)">?</button>
+  </header>
+
+  <main id="main">
+    <section class="left" id="left">
+      <div class="chart-panel">
+        <div class="toolbar">
+          <div class="seg" id="views">
+            <button data-view="flame" title="Merged call tree, callers on top (1)">Flame graph</button>
+            <button data-view="inverted" title="Inverted tree: where time is actually spent (2)">Bottom-up</button>
+            <button data-view="timeline" title="Call stacks in chronological order (3)">Timeline</button>
+            <button data-view="tasks" title="Samples grouped by async task / active function (4)">Tasks</button>
+          </div>
+          <div class="chart-info" id="chart-info"></div>
+          <div class="grow"></div>
+          <div class="hint" id="chart-hint">Ctrl + scroll to zoom · Shift + scroll to pan · drag to move</div>
+          <div class="zoom">
+            <span class="zoom-level" id="zoom-level">1×</span>
+            <button data-zoom="out" title="Zoom out (-)">−</button>
+            <button data-zoom="in" title="Zoom in (+)">+</button>
+            <button data-zoom="reset" title="Reset zoom (0)">Reset</button>
           </div>
         </div>
-      </div>
-      <div class="h-splitter" id="h-splitter"></div>
-      <div class="panel" id="panel-table" style="flex:1">
-        <div class="panel-header">
-          <div class="tab">Functions</div>
-          <div class="spacer"></div>
-          <input type="text" class="search-input" id="table-search" placeholder="Search functions…">
-          <div class="info" id="table-info"></div>
-        </div>
-        <div class="panel-body" id="fn-table-container">
-          <table class="fn-table"><thead><tr>
-            <th class="col-self sorted" data-sort="self">Self Time</th>
-            <th class="col-total" data-sort="total">Total Time</th>
-            <th class="col-self" data-sort="self-pct">Self %</th>
-            <th class="col-total" data-sort="total-pct">Total %</th>
-            <th class="col-name" data-sort="name">Function</th>
-            <th class="col-file" data-sort="file">File</th>
-          </tr></thead><tbody id="fn-table-body"></tbody></table>
+        <div class="minimap" id="minimap" hidden><canvas></canvas></div>
+        <div class="plot" id="plot">
+          <canvas></canvas>
+          <div class="hbar" hidden><div class="thumb"></div></div>
+          <div class="vbar" hidden><div class="thumb"></div></div>
+          <div class="empty" id="plot-empty" hidden></div>
         </div>
       </div>
+
+      <div class="splitter h" id="split-h" title="Drag to resize"></div>
+
+      <div class="bottom-panel">
+        <div class="tabs" id="tabs">
+          <button data-tab="functions">Functions</button>
+          <button data-tab="tree">Call tree</button>
+          <button data-tab="calls">Callers &amp; callees</button>
+          <div class="grow"></div>
+          <span class="tab-info" id="tab-info"></span>
+          <button class="icon-btn small" id="btn-collapse" title="Collapse / expand panel">▾</button>
+        </div>
+        <div class="tab-body" data-body="functions">
+          <div class="grid-head fn-cols" id="fn-head">
+            <div class="num sortable" data-sort="self">Self</div>
+            <div class="num sortable" data-sort="total">Total</div>
+            <div class="sortable" data-sort="name">Function</div>
+            <div class="sortable" data-sort="file">Location</div>
+          </div>
+          <div class="vlist" id="fn-list"></div>
+        </div>
+        <div class="tab-body" data-body="tree">
+          <div class="grid-head tree-cols">
+            <div>Call path</div>
+            <div class="num">Total</div>
+            <div class="num">Self</div>
+          </div>
+          <div class="vlist" id="tree-list"></div>
+        </div>
+        <div class="tab-body" data-body="calls"><div class="calls" id="calls"></div></div>
+      </div>
+    </section>
+
+    <div class="splitter v" id="split-v" title="Drag to resize"></div>
+
+    <aside class="side" id="side">
+      <div class="side-head">
+        <div class="side-title">
+          <div class="side-fn" id="src-fn">Source</div>
+          <div class="side-path" id="src-path"></div>
+        </div>
+        <button class="icon-btn" id="src-close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="src-body" id="src-body"></div>
+    </aside>
+  </main>
+
+  <footer class="status">
+    <div class="legend" id="legend-module">
+      <span><i style="background:#c8693f"></i>Your code</span>
+      <span><i style="background:#3e5a63"></i>Libraries</span>
+      <span><i style="background:#3a404f"></i>Standard library</span>
+      <span><i style="background:#2b2f3a"></i>Interpreter internals</span>
     </div>
-    <div class="v-splitter" id="v-splitter"></div>
-    <div id="source-panel">
-      <div class="panel-header">
-        <span class="file-path" id="source-file-path">—</span>
-        <button id="source-close" title="Close">✕</button>
-      </div>
-      <div class="panel-body" id="source-code"></div>
+    <div class="legend" id="legend-heat" hidden>
+      <span>Self time</span><span class="heat-scale"></span><span>low → high</span>
+    </div>
+    <div class="grow"></div>
+    <div class="status-sel" id="status-sel"></div>
+  </footer>
+</div>
+
+<div id="tip" class="tip" hidden></div>
+
+<div id="help" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head"><h3>Keyboard &amp; mouse</h3><button class="icon-btn" data-close>✕</button></div>
+    <div class="keys">
+      <div><kbd>Click</kbd><span>Select a function and show its source</span></div>
+      <div><kbd>Double-click</kbd><span>Zoom to the frame (double-click empty space to reset)</span></div>
+      <div><kbd>Ctrl/⌘ + scroll</kbd><span>Zoom at cursor (trackpad pinch works too)</span></div>
+      <div><kbd>Shift + scroll</kbd><span>Pan horizontally</span></div>
+      <div><kbd>Scroll</kbd><span>Scroll vertically through deep stacks</span></div>
+      <div><kbd>Drag</kbd><span>Pan in any direction</span></div>
+      <div><kbd>Drag overview</kbd><span>Select a time range to zoom into (Timeline / Tasks)</span></div>
+      <div><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd><span>Flame graph · Bottom-up · Timeline · Tasks</span></div>
+      <div><kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd><span>Zoom in · out · reset</span></div>
+      <div><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd><span>Pan and scroll</span></div>
+      <div><kbd>/</kbd><span>Search</span></div>
+      <div><kbd>S</kbd><span>Toggle source panel</span></div>
+      <div><kbd>Esc</kbd><span>Close panel · reset zoom · clear selection</span></div>
     </div>
   </div>
 </div>
-<div id="flame-tooltip"><div class="fn-name"></div><div class="fn-file"></div><div class="fn-time"></div><div class="fn-hint"></div></div>
-<script>
-(()=>{
-"use strict";
 
-let profileData,metaData,currentProfileIndex=0,processedFrames=[],flameRoot,
-    sortColumn="self",sortAsc=false,searchTerm="",totalSamples=0,
-    hideInternals=true,flameZoomStack=[],flameViewRoot=null;
-
-let vpZoom=1, vpPanX=0;
-
-// View mode: "flame" (merged), "timeline" (chronological), "inverted" (bottom-up)
-let viewMode="flame";
-
-// Cached flattened rects - only rebuilt when tree/zoom-node changes
-let cachedRects=null, cachedMaxD=0;
-
-// Cross-highlight state (function name highlighted from table hover)
-let highlightName="";
-
-// Zoom animation state
-let animating=false, animFrom={zoom:1,panX:0}, animTo={zoom:1,panX:0}, animStart=0, animDuration=180;
-
-// Timeline state
-let tlSamples=[], tlFrames=[], tlMaxDepth=0;
-
-// Swimlane state (task-grouped timeline)
-let swimlaneMode=false;
-let taskLanes=[]; // [{name, samples: [{si, stack}]}] sorted by first appearance
-let LANE_H=24, LANE_GAP=2;
-
-// rAF throttle for flame rendering
-let flameRafId=0;
-function scheduleFlameRender(){
-  if(!flameRafId) flameRafId=requestAnimationFrame(()=>{flameRafId=0;renderDispatch()});
-}
-
-// DOM cache - populated once on init
-let $=null;
-function initDomCache(){
-  $={
-    flameContainer:document.getElementById("flame-container"),
-    flameCanvas:document.getElementById("flame-canvas"),
-    flameInfo:document.getElementById("flame-info"),
-    flameZoomInd:document.getElementById("flame-zoom-indicator"),
-    tooltip:document.getElementById("flame-tooltip"),
-    ttName:document.querySelector("#flame-tooltip .fn-name"),
-    ttFile:document.querySelector("#flame-tooltip .fn-file"),
-    ttTime:document.querySelector("#flame-tooltip .fn-time"),
-    ttHint:document.querySelector("#flame-tooltip .fn-hint"),
-    tableBody:document.getElementById("fn-table-body"),
-    tableSearch:document.getElementById("table-search"),
-    tableInfo:document.getElementById("table-info"),
-    headerMeta:document.getElementById("header-meta"),
-    threadSelect:document.getElementById("thread-select"),
-    toggleBtn:document.getElementById("toggle-internals"),
-    toggleView:document.getElementById("toggle-view"),
-    toggleSwimlane:document.getElementById("toggle-swimlane"),
-    toggleInverted:document.getElementById("toggle-inverted"),
-    sourcePanel:document.getElementById("source-panel"),
-    vSplitter:document.getElementById("v-splitter"),
-    sourceCode:document.getElementById("source-code"),
-    sourceFilePath:document.getElementById("source-file-path"),
-    panelFlame:document.getElementById("panel-flame"),
-    panelTable:document.getElementById("panel-table"),
-    leftPanels:document.getElementById("left-panels"),
-    mainWrapper:document.getElementById("main-wrapper"),
-    hSplitter:document.getElementById("h-splitter"),
-    flameTab:document.querySelector("#panel-flame .tab"),
-  };
-}
-
-const INTERNAL_NAMES=new Set(["_call_with_frames_removed","_find_and_load","_find_and_load_unlocked",
-  "_load_unlocked","_load","_gcd_import","_handle_fromlist","_bootstrap","_bootstrap_external","__import__"]);
-const INTERNAL_FILE_RE=[/frozen/i,/importlib[\\/]_bootstrap/,/<frozen /];
-function isInternal(n,f){if(INTERNAL_NAMES.has(n))return true;if(f)for(const r of INTERNAL_FILE_RE)if(r.test(f))return true;return false}
-function skip(n,f){return hideInternals&&isInternal(n,f)}
-
-function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
-function shortPath(p){if(!p)return"";const s=p.replace(/\\/g,"/").split("/");return s.length<=3?p:"\u2026/"+s.slice(-3).join("/")}
-function displayName(name,file){
-  if(name==="<module>"&&file){const parts=file.replace(/\\/g,"/").split("/");return"<module> ("+parts[parts.length-1]+")"}
-  return name;
-}
-function fmtTime(v){
-  if(Number.isInteger(v))return v+" samples";
-  if(v>=60)return(v/60).toFixed(1)+"m";
-  if(v>=1)return v.toFixed(2)+"s";
-  return(v*1000).toFixed(1)+"ms";
-}
-
-// Stable color from function name (for timeline mode)
-function nameHue(name){
-  let h=0;for(let i=0;i<name.length;i++){h=((h<<5)-h+name.charCodeAt(i))|0}
-  return((h%360)+360)%360;
-}
-function nameColor(name){
-  const h=nameHue(name);
-  return"hsl("+h+",55%,45%)";
-}
-
-// --- Data loading ---
-async function loadData(){
-  try{
-    const[mr,pr]=await Promise.all([fetch("/api/meta"),fetch("/api/profile")]);
-    if(!mr.ok)throw new Error("Failed to load metadata (HTTP "+mr.status+")");
-    if(!pr.ok)throw new Error("Failed to load profile (HTTP "+pr.status+")");
-    metaData=await mr.json();profileData=await pr.json();
-  }catch(err){
-    const el=document.getElementById("loading");
-    el.innerHTML='<div style="color:#ff6b6b;font-family:var(--font-mono);font-size:14px;text-align:center;padding:20px"><div style="margin-bottom:8px">Failed to load profile data</div><div style="font-size:12px;color:#8890a8">'+esc(err.message)+'</div></div>';
-    return;
-  }
-  const target=metaData.command||metaData.script||"unknown";
-  $.headerMeta.textContent=target+" \u00b7 "+(metaData.timestamp||"");
-  document.title="codexplore \u00b7 "+target;
-  populateThreadSelect();processProfile();resetZoom();renderAll();
-  document.getElementById("loading").style.display="none";
-  document.getElementById("app").style.display="";
-}
-function populateThreadSelect(){
-  const sel=$.threadSelect;sel.innerHTML="";
-  (profileData.profiles||[]).forEach((p,i)=>{const o=document.createElement("option");o.value=i;o.textContent=p.name||"Thread "+i;sel.appendChild(o)});
-  sel.addEventListener("change",()=>{currentProfileIndex=+sel.value;processProfile();resetZoom();renderAll()});
-}
-
-// --- Profile processing ---
-function processProfile(){
-  const prof=profileData.profiles[currentProfileIndex],sf=profileData.shared?.frames||[],
-    samples=prof.samples||[],weights=prof.weights||samples.map(()=>1);
-  totalSamples=weights.reduce((a,b)=>a+b,0);
-  const fs=new Map();
-  for(let si=0;si<samples.length;si++){
-    const stk=samples[si],w=weights[si],seen=new Set();
-    let lastVisIdx=-1;
-    for(let fi=0;fi<stk.length;fi++){
-      const idx=stk[fi],f=sf[idx]||{},nm=f.name||"<frame "+idx+">",fl=f.file||"",dn=displayName(nm,fl);
-      if(skip(nm,fl))continue;
-      if(!fs.has(idx))fs.set(idx,{index:idx,self:0,total:0,name:dn,file:fl,line:f.line||0});
-      if(!seen.has(idx)){fs.get(idx).total+=w;seen.add(idx)}
-      lastVisIdx=idx;
-    }
-    if(lastVisIdx>=0)fs.get(lastVisIdx).self+=w;
-  }
-  processedFrames=Array.from(fs.values());
-  flameRoot=buildTree(samples,weights,sf);
-  cachedRects=null;
-  buildTimelineData(samples,weights,sf);
-}
-
-function buildTree(samples,weights,sf){
-  const root={name:"(root)",children:[],value:0,self:0,file:"",line:0,frameIndex:-1};
-  for(let si=0;si<samples.length;si++){
-    const stk=samples[si],w=weights[si];let node=root;root.value+=w;
-    for(let fi=0;fi<stk.length;fi++){
-      const idx=stk[fi],fr=sf[idx]||{},nm=fr.name||"<frame "+idx+">",fl=fr.file||"",dn=displayName(nm,fl);
-      if(skip(nm,fl))continue;
-      let ch=node.children.find(c=>c.frameIndex===idx);
-      if(!ch){ch={frameIndex:idx,name:dn,file:fl,line:fr.line||0,children:[],value:0,self:0};node.children.push(ch)}
-      ch.value+=w;node=ch;
-    }
-    if(node!==root)node.self+=w;
-  }
-  (function presort(nd){nd.children.sort((a,b)=>b.value-a.value);nd.children.forEach(presort)})(root);
-  return root;
-}
-
-function buildInvertedTree(samples,weights,sf){
-  const root={name:"(root)",children:[],value:0,self:0,file:"",line:0,frameIndex:-1};
-  for(let si=0;si<samples.length;si++){
-    const stk=samples[si],w=weights[si];let node=root;root.value+=w;
-    let selfDone=false;
-    for(let fi=stk.length-1;fi>=0;fi--){
-      const idx=stk[fi],fr=sf[idx]||{},nm=fr.name||"<frame "+idx+">",fl=fr.file||"",dn=displayName(nm,fl);
-      if(skip(nm,fl))continue;
-      let ch=node.children.find(c=>c.frameIndex===idx);
-      if(!ch){ch={frameIndex:idx,name:dn,file:fl,line:fr.line||0,children:[],value:0,self:0};node.children.push(ch)}
-      ch.value+=w;if(!selfDone){ch.self+=w;selfDone=true}node=ch;
-    }
-  }
-  (function presort(nd){nd.children.sort((a,b)=>b.value-a.value);nd.children.forEach(presort)})(root);
-  return root;
-}
-
-function buildTimelineData(samples,weights,sf){
-  tlSamples=[];tlMaxDepth=0;tlFrames=sf;
-  const taskMap=new Map();
-  const TASK_STEP_RE=/^Task\.__step|^Task\.\w*step|^TaskGroup\._spawn|^_task_step/;
-  const INTERNAL_PATH_RE=/asyncio[\\/]|_selector_events|_unix_events|selectors\.py|threading\.py/;
-
-  for(let si=0;si<samples.length;si++){
-    const stk=samples[si],filtered=[];
-    for(let fi=0;fi<stk.length;fi++){
-      const idx=stk[fi],fr=sf[idx]||{},nm=fr.name||"<frame "+idx+">",fl=fr.file||"";
-      if(skip(nm,fl))continue;
-      filtered.push({idx,name:displayName(nm,fl),file:fl,line:fr.line||0,rawName:nm});
-    }
-
-    // Detect task identity: find Task.__step and take the frame AFTER it (the coroutine)
-    let taskName=null;
-    for(let k=0;k<filtered.length-1;k++){
-      if(TASK_STEP_RE.test(filtered[k].rawName)){
-        taskName=filtered[k+1].name;
-        break;
-      }
-    }
-
-    // Fallback: find the first frame that looks like user code (not stdlib/asyncio internals)
-    if(!taskName){
-      for(let k=filtered.length-1;k>=0;k--){
-        const f=filtered[k];
-        if(f.file&&!INTERNAL_PATH_RE.test(f.file)&&!f.file.includes("site-packages")){
-          taskName=f.name;break;
-        }
-      }
-    }
-    if(!taskName&&filtered.length>0)taskName=filtered[filtered.length-1].name;
-    if(!taskName)taskName="(idle)";
-
-    tlSamples.push(filtered);
-    if(filtered.length>tlMaxDepth)tlMaxDepth=filtered.length;
-
-    if(!taskMap.has(taskName))taskMap.set(taskName,{name:taskName,samples:[],firstSeen:si});
-    taskMap.get(taskName).samples.push({si,stack:filtered});
-  }
-
-  // Sort lanes by total samples (heaviest first), with ties broken by first appearance
-  taskLanes=Array.from(taskMap.values()).sort((a,b)=>b.samples.length-a.samples.length||a.firstSeen-b.firstSeen);
-}
-
-// --- Flatten tree into rects (cached) ---
-function rebuildRects(){
-  const root=flameViewRoot||flameRoot;
-  const rects=[];let maxD=0;
-  (function flat(nd,x,d){
-    if(!nd.value)return;const w=nd.value/root.value;
-    if(nd!==root){rects.push({node:nd,x,w,depth:d});maxD=Math.max(maxD,d)}
-    let cx=x;for(const c of nd.children){flat(c,cx,d+1);cx+=c.value/root.value}
-  })(root,0,0);
-  cachedRects=rects;cachedMaxD=maxD;
-}
-
-// --- Zoom ---
-function resetZoom(){flameZoomStack=[];flameViewRoot=flameRoot;vpZoom=1;vpPanX=0;cachedRects=null;animating=false;updateBC()}
-function zoomInto(n){
-  if(!n||n===flameViewRoot)return;
-  // Calculate where target node currently sits on screen for animated transition
-  if(cachedRects){
-    const cW=$.flameContainer.clientWidth,logW=cW*vpZoom;
-    const rc=cachedRects.find(r=>r.node===n);
-    if(rc){
-      const targetZoom=1/rc.w;
-      const targetPanX=-rc.x*cW*targetZoom;
-      animFrom={zoom:vpZoom,panX:vpPanX};
-      animTo={zoom:Math.min(targetZoom,200),panX:targetPanX};
-      animStart=performance.now();animating=true;
-      animateZoom(()=>{
-        flameZoomStack.push(n);flameViewRoot=n;vpZoom=1;vpPanX=0;cachedRects=null;updateBC();renderFlame();
-      });
-      return;
-    }
-  }
-  flameZoomStack.push(n);flameViewRoot=n;vpZoom=1;vpPanX=0;cachedRects=null;updateBC();renderFlame();
-}
-function animateZoom(onDone){
-  const step=()=>{
-    const t=Math.min((performance.now()-animStart)/animDuration,1);
-    const ease=1-Math.pow(1-t,3);
-    vpZoom=animFrom.zoom+(animTo.zoom-animFrom.zoom)*ease;
-    vpPanX=animFrom.panX+(animTo.panX-animFrom.panX)*ease;
-    clampPan($.flameContainer.clientWidth);
-    renderDispatch();
-    if(t<1)requestAnimationFrame(step);
-    else{animating=false;if(onDone)onDone()}
-  };
-  requestAnimationFrame(step);
-}
-function zoomTo(lv){
-  if(lv<0)resetZoom();
-  else{flameZoomStack=flameZoomStack.slice(0,lv+1);flameViewRoot=flameZoomStack[flameZoomStack.length-1]||flameRoot}
-  vpZoom=1;vpPanX=0;cachedRects=null;animating=false;updateBC();renderFlame();
-}
-function updateBC(){
-  const el=$.flameZoomInd;if(!flameZoomStack.length){el.innerHTML="";return}
-  let h='<span class="bc root" data-lv="-1">\u27f5 root</span>';
-  flameZoomStack.forEach((n,i)=>{const l=n.name.length>25?n.name.slice(0,25)+"\u2026":n.name;h+='<span class="bc" data-lv="'+i+'">'+esc(l)+'</span>'});
-  el.innerHTML=h;
-  el.querySelectorAll(".bc").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();zoomTo(+b.dataset.lv)}));
-}
-
-function renderAll(){renderFlame();renderTable()}
-function renderFlame(){scheduleFlameRender()}
-
-function renderDispatch(){
-  if(viewMode==="timeline"){
-    if(swimlaneMode)renderSwimlanesImmediate();
-    else renderTimelineImmediate();
-  }
-  else renderFlameImmediate();
-}
-
-// --- Text truncation with cache + binary search ---
-const ROW_H=20,FONT_SZ=11;
-const textWCache=new Map();
-let measCtx=null;
-function getTextW(t){
-  let w=textWCache.get(t);if(w!==undefined)return w;
-  if(!measCtx){const c=document.createElement("canvas");measCtx=c.getContext("2d");measCtx.font=FONT_SZ+"px JetBrains Mono,monospace"}
-  w=measCtx.measureText(t).width;
-  if(textWCache.size>4000)textWCache.clear();
-  textWCache.set(t,w);return w;
-}
-function truncFast(t,mw){
-  if(getTextW(t)<=mw)return t;
-  let lo=0,hi=t.length;
-  while(lo<hi){const mid=(lo+hi+1)>>1;if(getTextW(t.slice(0,mid)+"\u2026")<=mw)lo=mid;else hi=mid-1}
-  return lo>0?t.slice(0,lo)+"\u2026":"";
-}
-
-// --- Flame rendering (called via rAF) ---
-function renderFlameImmediate(){
-  const container=$.flameContainer,canvas=$.flameCanvas,ctx=canvas.getContext("2d"),dpr=devicePixelRatio||1;
-  if(!cachedRects)rebuildRects();
-  const rects=cachedRects,maxD=cachedMaxD;
-  const cW=container.clientWidth,cH=container.clientHeight;
-  const ch=Math.max((maxD+2)*ROW_H,cH);
-  const needW=Math.round(cW*dpr),needH=Math.round(ch*dpr);
-  if(canvas.width!==needW||canvas.height!==needH){canvas.width=needW;canvas.height=needH;canvas.style.width=cW+"px";canvas.style.height=ch+"px"}
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle="#0c0e14";ctx.fillRect(0,0,cW,ch);
-
-  // Depth stripes
-  for(let d=0;d<=maxD;d++){
-    if(d%2===0)continue;
-    ctx.fillStyle="rgba(255,255,255,0.015)";
-    ctx.fillRect(0,(d-1)*ROW_H,cW,ROW_H);
-  }
-
-  const filt=searchTerm.toLowerCase(),hasFilt=filt.length>0;
-  const hasHL=highlightName.length>0;
-  const logW=cW*vpZoom;
-  ctx.font=FONT_SZ+"px JetBrains Mono,monospace";
-  ctx.textBaseline="alphabetic";
-
-  let matchedSamples=0;
-  for(let i=0,len=rects.length;i<len;i++){
-    const r=rects[i],px=r.x*logW+vpPanX,pw=r.w*logW,py=(r.depth-1)*ROW_H;
-    if(px+pw<0||px>cW||pw<0.5)continue;
-    const n=r.node,sp=n.self/totalSamples,tp=n.value/totalSamples;
-    const matches=!hasFilt||n.name.toLowerCase().indexOf(filt)!==-1||(n.file&&n.file.toLowerCase().indexOf(filt)!==-1);
-    if(hasFilt&&matches)matchedSamples+=n.self;
-    const dim=(hasFilt&&!matches)||(hasHL&&n.name!==highlightName);
-    const drawX=px<0?0:px+.5,drawW=px<0?pw+px:Math.min(pw,cW-px);
-    ctx.fillStyle=dim?"rgba(30,33,45,0.8)":heatC(sp,tp);
-    ctx.fillRect(drawX,py+.5,Math.max(drawW-1,1),ROW_H-1);
-    if(hasHL&&n.name===highlightName){
-      ctx.strokeStyle="rgba(108,140,255,0.9)";ctx.lineWidth=1.5;
-      ctx.strokeRect(drawX+1,py+1,Math.max(drawW-3,1),ROW_H-3);
-    }
-    if(pw>35&&!dim){
-      const label=truncFast(n.name,pw-8);
-      if(label){
-        const lx=px<0?4:px+4;
-        if(px<0||px+pw>cW){ctx.save();ctx.beginPath();ctx.rect(drawX,py,drawW,ROW_H);ctx.clip();ctx.fillStyle="#e2e6f0";ctx.fillText(label,lx,py+14);ctx.restore()}
-        else{ctx.fillStyle="#e2e6f0";ctx.fillText(label,lx,py+14)}
-      }
-    }
-  }
-  const zp=Math.round(vpZoom*100);
-  let info=fmtTime(totalSamples)+" \u00b7 "+processedFrames.length+" frames";
-  if(hasFilt)info+=" \u00b7 matched: "+((matchedSamples/totalSamples)*100).toFixed(1)+"%";
-  if(vpZoom>1.01)info+=" \u00b7 "+zp+"%";
-  $.flameInfo.textContent=info;
-}
-function heatC(s,t){return s>.15?"#e84040":s>.08?"#e86840":s>.03?"#d88840":s>.01?"#b89848":t>.3?"#5878a8":t>.1?"#486898":"#3a5080"}
-
-// --- Timeline rendering ---
-function renderTimelineImmediate(){
-  const container=$.flameContainer,canvas=$.flameCanvas,ctx=canvas.getContext("2d"),dpr=devicePixelRatio||1;
-  const cW=container.clientWidth,cH=container.clientHeight;
-  const nSamples=tlSamples.length;
-  if(!nSamples){ctx.fillStyle="#0c0e14";ctx.fillRect(0,0,cW,cH);return}
-
-  const ch=Math.max((tlMaxDepth+1)*ROW_H,cH);
-  const needW=Math.round(cW*dpr),needH=Math.round(ch*dpr);
-  if(canvas.width!==needW||canvas.height!==needH){canvas.width=needW;canvas.height=needH;canvas.style.width=cW+"px";canvas.style.height=ch+"px"}
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle="#0c0e14";ctx.fillRect(0,0,cW,ch);
-
-  const logW=cW*vpZoom;
-  const colW=logW/nSamples;
-  const filt=searchTerm.toLowerCase(),hasFilt=filt.length>0;
-  ctx.font=FONT_SZ+"px JetBrains Mono,monospace";
-  ctx.textBaseline="alphabetic";
-
-  const startIdx=Math.max(0,Math.floor(-vpPanX/colW));
-  const endIdx=Math.min(nSamples,Math.ceil((cW-vpPanX)/colW));
-
-  let matchedCount=0;
-  for(let si=startIdx;si<endIdx;si++){
-    const stk=tlSamples[si];
-    const px=si*colW+vpPanX;
-    const pw=colW;
-    if(pw<0.3)continue;
-    for(let d=0;d<stk.length;d++){
-      const fr=stk[d];
-      const py=d*ROW_H;
-      const matches=!hasFilt||fr.name.toLowerCase().indexOf(filt)!==-1||(fr.file&&fr.file.toLowerCase().indexOf(filt)!==-1);
-      if(hasFilt&&matches&&d===stk.length-1)matchedCount++;
-      ctx.fillStyle=(hasFilt&&!matches)?"rgba(30,33,45,0.8)":nameColor(fr.name);
-      ctx.fillRect(px+.5,py+.5,Math.max(pw-1,0.5),ROW_H-1);
-      if(pw>50){
-        const label=truncFast(fr.name,pw-6);
-        if(label){ctx.fillStyle="#e2e6f0";ctx.fillText(label,px+3,py+14)}
-      }
-    }
-  }
-
-  let info="Timeline \u00b7 "+nSamples+" samples \u00b7 depth "+tlMaxDepth;
-  if(hasFilt)info+=" \u00b7 matched: "+((matchedCount/nSamples)*100).toFixed(1)+"%";
-  if(vpZoom>1.01)info+=" \u00b7 "+Math.round(vpZoom*100)+"%";
-  $.flameInfo.textContent=info;
-}
-
-// --- Swimlane rendering ---
-function renderSwimlanesImmediate(){
-  const container=$.flameContainer,canvas=$.flameCanvas,ctx=canvas.getContext("2d"),dpr=devicePixelRatio||1;
-  const cW=container.clientWidth,cH=container.clientHeight;
-  const nSamples=tlSamples.length,nLanes=taskLanes.length;
-  if(!nSamples||!nLanes){ctx.fillStyle="#0c0e14";ctx.fillRect(0,0,cW,cH);return}
-
-  const laneFullH=LANE_H+LANE_GAP;
-  const labelW=150;
-  const ch=Math.max(nLanes*laneFullH+LANE_H,cH);
-  const needW=Math.round(cW*dpr),needH=Math.round(ch*dpr);
-  if(canvas.width!==needW||canvas.height!==needH){canvas.width=needW;canvas.height=needH;canvas.style.width=cW+"px";canvas.style.height=ch+"px"}
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.fillStyle="#0c0e14";ctx.fillRect(0,0,cW,ch);
-
-  const chartW=cW-labelW;
-  const logW=chartW*vpZoom;
-  const colW=logW/nSamples;
-  const filt=searchTerm.toLowerCase(),hasFilt=filt.length>0;
-  ctx.font=FONT_SZ+"px JetBrains Mono,monospace";
-  ctx.textBaseline="alphabetic";
-
-  // Draw lanes
-  for(let li=0;li<nLanes;li++){
-    const lane=taskLanes[li];
-    const ly=li*laneFullH;
-    const matches=!hasFilt||lane.name.toLowerCase().indexOf(filt)!==-1||(lane.samples.length>0&&lane.samples[0].stack.some(f=>f.file&&f.file.toLowerCase().indexOf(filt)!==-1));
-
-    // Lane background stripe
-    if(li%2===1)ctx.fillStyle="rgba(255,255,255,0.015)";
-    else ctx.fillStyle="rgba(0,0,0,0)";
-    if(li%2===1)ctx.fillRect(0,ly,cW,LANE_H);
-
-    // Lane label
-    ctx.fillStyle=(hasFilt&&!matches)?"rgba(88,94,116,0.4)":"#8890a8";
-    const labelText=truncFast(lane.name,labelW-24);
-    if(labelText)ctx.fillText(labelText,12,ly+15);
-
-    // Draw sample markers for this lane (with viewport culling)
-    const col=(hasFilt&&!matches)?"rgba(30,33,45,0.8)":nameColor(lane.name);
-    ctx.fillStyle=col;
-
-    const visStart=Math.floor(-vpPanX/colW);
-    const visEnd=Math.ceil((chartW-vpPanX)/colW);
-    for(let i=0;i<lane.samples.length;i++){
-      const si=lane.samples[i].si;
-      if(si<visStart)continue;
-      if(si>visEnd)break;
-      const px=labelW+si*colW+vpPanX;
-      const pw=Math.max(colW,1);
-      const drawX=Math.max(px,labelW);
-      const drawW=Math.min(px+pw,cW)-drawX;
-      if(drawW<0.3)continue;
-      ctx.fillRect(drawX,ly+2,drawW,LANE_H-4);
-    }
-  }
-
-  // Separator line between labels and chart
-  ctx.strokeStyle="rgba(42,47,64,0.8)";ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(labelW,0);ctx.lineTo(labelW,ch);ctx.stroke();
-
-  // Lane separators
-  ctx.strokeStyle="rgba(42,47,64,0.4)";
-  for(let li=1;li<nLanes;li++){
-    const ly=li*laneFullH-LANE_GAP/2;
-    ctx.beginPath();ctx.moveTo(0,ly);ctx.lineTo(cW,ly);ctx.stroke();
-  }
-
-  let info="Tasks \u00b7 "+nLanes+" lanes \u00b7 "+nSamples+" samples";
-  if(vpZoom>1.01)info+=" \u00b7 "+Math.round(vpZoom*100)+"%";
-  $.flameInfo.textContent=info;
-}
-
-// --- Hit test ---
-function hit(mx,my){
-  if(viewMode==="timeline"){
-    if(swimlaneMode)return hitSwimlane(mx,my);
-    return hitTimeline(mx,my);
-  }
-  if(!cachedRects)return null;
-  const logW=$.flameContainer.clientWidth*vpZoom;
-  for(let i=0,len=cachedRects.length;i<len;i++){
-    const rc=cachedRects[i],py=(rc.depth-1)*ROW_H;
-    if(my<py||my>py+ROW_H)continue;
-    const px=rc.x*logW+vpPanX,pw=rc.w*logW;
-    if(mx>=px&&mx<=px+pw)return rc;
-  }
-  return null;
-}
-
-function hitTimeline(mx,my){
-  const nSamples=tlSamples.length;if(!nSamples)return null;
-  const cW=$.flameContainer.clientWidth;
-  const logW=cW*vpZoom,colW=logW/nSamples;
-  const si=Math.floor((mx-vpPanX)/colW);
-  if(si<0||si>=nSamples)return null;
-  const d=Math.floor(my/ROW_H);
-  const stk=tlSamples[si];
-  if(d<0||d>=stk.length)return null;
-  const fr=stk[d];
-  return{node:{name:fr.name,file:fr.file,line:fr.line,self:0,value:0,children:[]},sampleIdx:si,depth:d,timeline:true};
-}
-
-function hitSwimlane(mx,my){
-  const nSamples=tlSamples.length,nLanes=taskLanes.length;
-  if(!nSamples||!nLanes)return null;
-  const labelW=150;
-  const laneFullH=LANE_H+LANE_GAP;
-  const li=Math.floor(my/laneFullH);
-  if(li<0||li>=nLanes)return null;
-  const lane=taskLanes[li];
-  if(mx<labelW){
-    // Clicked on the label area
-    return{node:{name:lane.name,file:"",line:0,self:0,value:0,children:[]},timeline:true,swimlane:true,laneIdx:li,sampleIdx:-1,depth:0};
-  }
-  const cW=$.flameContainer.clientWidth,chartW=cW-labelW;
-  const logW=chartW*vpZoom,colW=logW/nSamples;
-  const si=Math.floor((mx-labelW-vpPanX)/colW);
-  if(si<0||si>=nSamples)return null;
-  // Binary search for sample index in this lane (samples are sorted by si)
-  const arr=lane.samples;
-  let lo=0,hi=arr.length-1,match=null;
-  while(lo<=hi){const mid=(lo+hi)>>1;if(arr[mid].si===si){match=arr[mid];break}else if(arr[mid].si<si)lo=mid+1;else hi=mid-1}
-  if(!match)return null;
-  const stk=match.stack;
-  const leaf=stk.length?stk[stk.length-1]:null;
-  if(!leaf)return null;
-  return{node:{name:leaf.name,file:leaf.file,line:leaf.line,self:0,value:0,children:[]},timeline:true,swimlane:true,laneIdx:li,sampleIdx:si,depth:0};
-}
-
-function clampPan(cW){
-  const effW=(viewMode==="timeline"&&swimlaneMode)?cW-150:cW;
-  const logW=effW*vpZoom;
-  if(vpPanX>0)vpPanX=0;
-  if(vpPanX<effW-logW)vpPanX=effW-logW;
-  if(vpZoom<=1){vpPanX=0;vpZoom=1}
-}
-
-// --- Flame interaction ---
-function setupFlame(){
-  const canvas=$.flameCanvas,tt=$.tooltip,container=$.flameContainer;
-
-  container.addEventListener("wheel",e=>{
-    const rect=container.getBoundingClientRect(),mx=e.clientX-rect.left;
-    const isZoom=e.ctrlKey||e.metaKey;
-    const isHorizontal=Math.abs(e.deltaX)>Math.abs(e.deltaY);
-
-    // Allow native vertical scroll when not zooming and not panning horizontally
-    if(!isZoom&&!isHorizontal&&vpZoom<=1.01){return}
-
-    e.preventDefault();
-    if(isZoom){
-      const delta=-e.deltaY*0.02;
-      const oldZ=vpZoom;vpZoom=Math.max(1,Math.min(vpZoom*Math.exp(delta),200));
-      const focalX=(viewMode==="timeline"&&swimlaneMode)?mx-150:mx;
-      vpPanX=focalX-(focalX-vpPanX)/oldZ*vpZoom;
-    }else if(isHorizontal){
-      vpPanX-=e.deltaX;
-    }else{
-      // Vertical scroll when zoomed = horizontal pan
-      const delta=-e.deltaY*0.005;
-      const oldZ=vpZoom;vpZoom=Math.max(1,Math.min(vpZoom*Math.exp(delta),200));
-      const focalX=(viewMode==="timeline"&&swimlaneMode)?mx-150:mx;
-      vpPanX=focalX-(focalX-vpPanX)/oldZ*vpZoom;
-    }
-    clampPan(container.clientWidth);renderFlame();
-  },{passive:false});
-
-  let dragging=false,dragSX=0,dragSP=0;
-  container.addEventListener("mousedown",e=>{
-    if(e.button!==0||vpZoom<=1.01)return;
-    // In swimlane mode, don't initiate drag from the label area
-    if(viewMode==="timeline"&&swimlaneMode){const rect=container.getBoundingClientRect();if(e.clientX-rect.left<150)return}
-    dragging=true;dragSX=e.clientX;dragSP=vpPanX;container.style.cursor="grabbing";e.preventDefault();
-  });
-  document.addEventListener("mousemove",e=>{if(!dragging)return;vpPanX=dragSP+(e.clientX-dragSX);clampPan(container.clientWidth);renderFlame()});
-  document.addEventListener("mouseup",()=>{if(dragging){dragging=false;container.style.cursor=""}});
-
-  canvas.addEventListener("mousemove",e=>{
-    if(dragging)return;
-    const rect=canvas.getBoundingClientRect(),h=hit(e.clientX-rect.left,e.clientY-rect.top);
-    if(h){
-      const n=h.node;
-      $.ttName.textContent=n.name;
-      $.ttFile.textContent=n.file?shortPath(n.file)+":"+n.line:"";
-      if(h.timeline&&h.swimlane){
-        const lane=taskLanes[h.laneIdx];
-        const pct=((lane.samples.length/tlSamples.length)*100).toFixed(1);
-        $.ttName.textContent=h.sampleIdx>=0?n.name:lane.name;
-        $.ttTime.textContent="Task: "+lane.name+" \u00b7 "+lane.samples.length+" samples ("+pct+"% CPU)";
-        $.ttHint.textContent=h.sampleIdx>=0&&n.file?"Click=open source":"Scroll/pinch=zoom \u00b7 Drag=pan";
-      }else if(h.timeline){
-        $.ttTime.textContent="Sample #"+h.sampleIdx+" \u00b7 depth "+h.depth;
-        $.ttHint.textContent="Click=open source \u00b7 Scroll/pinch=zoom \u00b7 Drag=pan";
-      }else{
-        const vr=flameViewRoot||flameRoot;
-        $.ttTime.textContent="self: "+((n.self/totalSamples)*100).toFixed(1)+"% ("+fmtTime(n.self)+") \u00b7 total: "+((n.value/totalSamples)*100).toFixed(1)+"% ("+fmtTime(n.value)+")"+(flameZoomStack.length?" \u00b7 local: "+((n.value/vr.value)*100).toFixed(1)+"%":"");
-        $.ttHint.textContent=n.children.length?"Click=zoom \u00b7 Right-click=source \u00b7 Scroll/pinch=zoom \u00b7 Drag=pan":"Click=source";
-      }
-      tt.style.display="block";tt.style.left=(e.clientX+12)+"px";tt.style.top=(e.clientY-10)+"px";
-      const tr=tt.getBoundingClientRect();
-      if(tr.right>innerWidth)tt.style.left=(e.clientX-tr.width-12)+"px";
-      if(tr.bottom>innerHeight)tt.style.top=(e.clientY-tr.height-10)+"px";
-      canvas.style.cursor="pointer";
-      highlightTableRow(n.name);
-    }else{tt.style.display="none";canvas.style.cursor=vpZoom>1.01?"grab":"default";highlightTableRow("")}
-  });
-  canvas.addEventListener("mouseleave",()=>{tt.style.display="none";highlightTableRow("")});
-
-  let clkSX=0,clkSY=0;
-  canvas.addEventListener("mousedown",e=>{clkSX=e.clientX;clkSY=e.clientY});
-  canvas.addEventListener("click",e=>{
-    if(Math.abs(e.clientX-clkSX)>4||Math.abs(e.clientY-clkSY)>4)return;
-    const rect=canvas.getBoundingClientRect(),h2=hit(e.clientX-rect.left,e.clientY-rect.top);
-    if(!h2)return;
-    if(h2.timeline){if(h2.node.file)openSource(h2.node.file,h2.node.line)}
-    else if(h2.node.children.length)zoomInto(h2.node);
-    else if(h2.node.file)openSource(h2.node.file,h2.node.line);
-  });
-  canvas.addEventListener("contextmenu",e=>{
-    const rect=canvas.getBoundingClientRect(),h2=hit(e.clientX-rect.left,e.clientY-rect.top);
-    if(h2&&h2.node.file){e.preventDefault();openSource(h2.node.file,h2.node.line)}
-  });
-  canvas.addEventListener("dblclick",e=>{e.preventDefault();if(viewMode!=="timeline"&&flameZoomStack.length)zoomTo(flameZoomStack.length-2)});
-}
-
-// --- Cross-highlight: flame → table ---
-let lastHLRow=null;
-function highlightTableRow(name){
-  if(lastHLRow){lastHLRow.classList.remove("hl");lastHLRow=null}
-  if(!name)return;
-  const rows=$.tableBody.querySelectorAll("tr");
-  for(const row of rows){
-    const cell=row.querySelector(".col-name");
-    if(cell&&cell.textContent===name){row.classList.add("hl");lastHLRow=row;break}
-  }
-}
-
-// --- Function table ---
-function renderTable(){
-  const filt=$.tableSearch.value.toLowerCase();
-  let fr=[...processedFrames];
-  if(filt)fr=fr.filter(f=>f.name.toLowerCase().indexOf(filt)!==-1||f.file.toLowerCase().indexOf(filt)!==-1);
-  fr.sort((a,b)=>{let va,vb;switch(sortColumn){case"self":case"self-pct":va=a.self;vb=b.self;break;case"total":case"total-pct":va=a.total;vb=b.total;break;case"name":va=a.name;vb=b.name;break;case"file":va=a.file;vb=b.file;break;default:va=a.self;vb=b.self}return typeof va==="string"?(sortAsc?va.localeCompare(vb):vb.localeCompare(va)):(sortAsc?va-vb:vb-va)});
-  const mx=Math.max(...fr.map(f=>f.self),1);
-  const parts=new Array(fr.length);
-  for(let i=0;i<fr.length;i++){
-    const f=fr[i],sp=((f.self/totalSamples)*100).toFixed(1),tp=((f.total/totalSamples)*100).toFixed(1),
-      hw=Math.max((f.self/mx)*60,2),hc=f.self/totalSamples>.1?"var(--hot)":f.self/totalSamples>.03?"var(--warm)":f.self/totalSamples>.005?"var(--mild)":"var(--cold)";
-    parts[i]='<tr data-file="'+esc(f.file)+'" data-line="'+f.line+'"><td class="col-self"><span class="heat-bar" style="width:'+hw+'px;background:'+hc+'"></span>'+fmtTime(f.self)+'</td><td class="col-total">'+fmtTime(f.total)+'</td><td class="col-self">'+sp+'%</td><td class="col-total">'+tp+'%</td><td class="col-name" title="'+esc(f.name)+'">'+esc(f.name)+'</td><td class="col-file" title="'+esc(f.file)+':'+f.line+'">'+shortPath(f.file)+':'+f.line+'</td></tr>';
-  }
-  $.tableBody.innerHTML=parts.join("");
-  $.tableInfo.textContent=fr.length+" function"+(fr.length!==1?"s":"");
-}
-function setupTable(){
-  document.querySelectorAll(".fn-table th[data-sort]").forEach(th=>{
-    th.addEventListener("click",()=>{
-      const c=th.dataset.sort;if(sortColumn===c)sortAsc=!sortAsc;else{sortColumn=c;sortAsc=false}
-      document.querySelectorAll(".fn-table th").forEach(h=>h.classList.remove("sorted","asc"));
-      th.classList.add("sorted");if(sortAsc)th.classList.add("asc");renderTable();
-    });
-  });
-  $.tableBody.addEventListener("click",e=>{const tr=e.target.closest("tr");if(tr&&tr.dataset.file)openSource(tr.dataset.file,+(tr.dataset.line)||0)});
-  $.tableBody.addEventListener("mouseover",e=>{
-    const tr=e.target.closest("tr");if(!tr)return;
-    const name=tr.querySelector(".col-name")?.textContent||"";
-    if(name&&name!==highlightName){highlightName=name;renderFlame()}
-  });
-  $.tableBody.addEventListener("mouseleave",()=>{if(highlightName){highlightName="";renderFlame()}});
-  $.tableSearch.addEventListener("input",renderTable);
-  document.getElementById("flame-search").addEventListener("input",e=>{searchTerm=e.target.value;renderFlame()});
-}
-
-// --- View mode toggles ---
-function setupViewToggles(){
-  $.toggleBtn.addEventListener("click",()=>{
-    hideInternals=!hideInternals;$.toggleBtn.textContent=hideInternals?"Hide internals":"Show internals";
-    $.toggleBtn.classList.toggle("active",hideInternals);processProfile();resetZoom();renderAll();
-  });
-  $.toggleView.addEventListener("click",()=>{
-    if(viewMode==="timeline"){viewMode="flame";$.toggleView.textContent="Timeline";$.toggleView.classList.remove("active");swimlaneMode=false;$.toggleSwimlane.classList.remove("active")}
-    else{viewMode="timeline";$.toggleView.textContent="Flame Graph";$.toggleView.classList.add("active")}
-    $.flameTab.textContent=viewMode==="timeline"?(swimlaneMode?"Tasks":"Timeline"):"Flame Graph";
-    $.toggleInverted.style.display=viewMode==="timeline"?"none":"";
-    $.toggleSwimlane.style.display=viewMode==="timeline"?"":"none";
-    vpZoom=1;vpPanX=0;cachedRects=null;renderFlame();
-  });
-  $.toggleSwimlane.addEventListener("click",()=>{
-    swimlaneMode=!swimlaneMode;
-    $.toggleSwimlane.classList.toggle("active",swimlaneMode);
-    $.flameTab.textContent=swimlaneMode?"Tasks":"Timeline";
-    vpZoom=1;vpPanX=0;renderFlame();
-  });
-  $.toggleInverted.addEventListener("click",()=>{
-    const prof=profileData.profiles[currentProfileIndex],sf=profileData.shared?.frames||[],
-      samples=prof.samples||[],weights=prof.weights||samples.map(()=>1);
-    if(viewMode==="inverted"){
-      viewMode="flame";$.toggleInverted.classList.remove("active");
-      flameRoot=buildTree(samples,weights,sf);
-      $.flameTab.textContent="Flame Graph";
-    }else{
-      viewMode="inverted";$.toggleInverted.classList.add("active");
-      flameRoot=buildInvertedTree(samples,weights,sf);
-      $.flameTab.textContent="Flame Graph (Bottom-up)";
-    }
-    resetZoom();cachedRects=null;renderFlame();
-  });
-}
-
-// --- Source viewer with syntax highlighting ---
-const PY_KEYWORDS=new Set(["def","class","return","if","elif","else","for","while","import","from",
-  "as","with","try","except","finally","raise","yield","async","await","pass","break","continue",
-  "and","or","not","in","is","None","True","False","lambda","global","nonlocal","del","assert"]);
-
-function highlightPython(line){
-  let out="",i=0;const len=line.length;
-  while(i<len){
-    if(line[i]==="#"){out+='<span style="color:var(--text-muted);font-style:italic">'+esc(line.slice(i))+"</span>";break}
-    if(line[i]==='"'||line[i]==="'"){
-      const q=line[i];let j=i+1;
-      const triple=line.slice(i,i+3)===q+q+q;
-      if(triple){j=i+3;while(j<len&&line.slice(j,j+3)!==q+q+q)j++;j+=3}
-      else{while(j<len&&line[j]!==q){if(line[j]==="\\")j++;j++}j++}
-      out+='<span style="color:#98c379">'+esc(line.slice(i,j))+"</span>";i=j;continue;
-    }
-    if(/[a-zA-Z_]/.test(line[i])){
-      let j=i;while(j<len&&/[a-zA-Z0-9_]/.test(line[j]))j++;
-      const word=line.slice(i,j);
-      if(PY_KEYWORDS.has(word))out+='<span style="color:#c678dd">'+word+"</span>";
-      else if(j<len&&line[j]==="(")out+='<span style="color:#61afef">'+esc(word)+"</span>";
-      else out+=esc(word);
-      i=j;continue;
-    }
-    if(/[0-9]/.test(line[i])){
-      let j=i;while(j<len&&/[0-9.xXa-fA-F_eE+-]/.test(line[j]))j++;
-      out+='<span style="color:#d19a66">'+esc(line.slice(i,j))+"</span>";i=j;continue;
-    }
-    if(line[i]==="@"&&(i===0||/\s/.test(line[i-1]))){
-      let j=i+1;while(j<len&&/[a-zA-Z0-9_.]/.test(line[j]))j++;
-      out+='<span style="color:#e5c07b">'+esc(line.slice(i,j))+"</span>";i=j;continue;
-    }
-    out+=esc(line[i]);i++;
-  }
-  return out;
-}
-
-async function openSource(fp,line){
-  $.sourcePanel.classList.add("visible");$.vSplitter.classList.add("visible");
-  $.sourceFilePath.textContent=shortPath(fp);$.sourceFilePath.title=fp;
-  $.sourceCode.innerHTML='<div style="padding:20px;color:var(--text-muted)">Loading\u2026</div>';
-  try{
-    const res=await fetch("/api/source?path="+encodeURIComponent(fp)),data=await res.json();
-    if(data.error){$.sourceCode.innerHTML='<div style="padding:20px;color:var(--hot)">'+esc(data.error)+'</div>';return}
-    const lh={};for(const f of processedFrames)if(f.file===fp&&f.line>0)lh[f.line]=(lh[f.line]||0)+f.self;
-    const lines=data.content.split("\n"),sl=data.start_line||1,parts=new Array(lines.length);
-    const isPython=fp.endsWith(".py")||fp.endsWith(".pyx");
-    for(let i=0;i<lines.length;i++){
-      const ln=sl+i,heat=lh[ln]||0,hp=heat/totalSamples*100;
-      let cls="source-line";if(ln===line)cls+=" highlighted";if(hp>1)cls+=" hot";
-      const content=isPython?highlightPython(lines[i]):esc(lines[i]);
-      parts[i]='<div class="'+cls+'"><span class="line-no">'+ln+'</span><span class="line-heat">'+(heat>0?hp.toFixed(1)+"% ("+fmtTime(heat)+")":"")+'</span><span class="line-content">'+content+'</span></div>';
-    }
-    $.sourceCode.innerHTML=parts.join("");
-    requestAnimationFrame(()=>{const t=$.sourceCode.querySelector(".highlighted");if(t)t.scrollIntoView({block:"center",behavior:"smooth"})});
-  }catch(err){$.sourceCode.innerHTML='<div style="padding:20px;color:var(--hot)">Failed: '+esc(err.message)+'</div>'}
-  setTimeout(renderFlame,50);
-}
-function setupSource(){
-  document.getElementById("source-close").addEventListener("click",()=>{
-    $.sourcePanel.classList.remove("visible");$.vSplitter.classList.remove("visible");
-    $.leftPanels.style.flex="";$.leftPanels.style.width="";
-    $.sourcePanel.style.width="";
-    setTimeout(renderFlame,50);
-  });
-}
-
-// --- Splitters ---
-function setupSplitters(){
-  let hDrag=false,vDrag=false;
-  $.hSplitter.addEventListener("mousedown",e=>{e.preventDefault();hDrag=true;$.hSplitter.classList.add("active");document.body.style.cursor="row-resize";document.body.style.userSelect="none"});
-  $.vSplitter.addEventListener("mousedown",e=>{e.preventDefault();vDrag=true;$.vSplitter.classList.add("active");document.body.style.cursor="col-resize";document.body.style.userSelect="none"});
-  document.addEventListener("mousemove",e=>{
-    if(hDrag){const r=$.leftPanels.getBoundingClientRect(),y=e.clientY-r.top,tot=r.height-5,fh=Math.max(80,Math.min(y,tot-80));$.panelFlame.style.flex="none";$.panelFlame.style.height=fh+"px";$.panelTable.style.flex="none";$.panelTable.style.height=(tot-fh)+"px";renderFlame()}
-    if(vDrag){const wr=$.mainWrapper.getBoundingClientRect(),x=e.clientX-wr.left,tot=wr.width-5,lw=Math.max(300,Math.min(x,tot-250));$.leftPanels.style.flex="none";$.leftPanels.style.width=lw+"px";$.sourcePanel.style.width=(tot-lw)+"px";renderFlame()}
-  });
-  document.addEventListener("mouseup",()=>{
-    if(hDrag){hDrag=false;$.hSplitter.classList.remove("active");document.body.style.cursor="";document.body.style.userSelect=""}
-    if(vDrag){vDrag=false;$.vSplitter.classList.remove("active");document.body.style.cursor="";document.body.style.userSelect=""}
-  });
-}
-
-// --- Keyboard ---
-document.addEventListener("keydown",e=>{
-  if(e.key==="Escape"){
-    if($.sourcePanel.classList.contains("visible")){$.sourcePanel.classList.remove("visible");$.vSplitter.classList.remove("visible");$.leftPanels.style.flex="";$.leftPanels.style.width="";$.sourcePanel.style.width="";setTimeout(renderFlame,50)}
-    else if(flameZoomStack.length){resetZoom();renderFlame()}
-  }
-  if(e.key==="Backspace"&&!e.target.matches("input,textarea")&&flameZoomStack.length)zoomTo(flameZoomStack.length-2);
-});
-let resizeT;window.addEventListener("resize",()=>{clearTimeout(resizeT);resizeT=setTimeout(()=>{if(flameRoot)renderFlame()},150)});
-
-// --- Boot ---
-document.addEventListener("DOMContentLoaded",()=>{initDomCache();setupFlame();setupTable();setupSource();setupSplitters();setupViewToggles();loadData()});
-})();
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

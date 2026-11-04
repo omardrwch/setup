@@ -54,9 +54,14 @@ codexplore analyze run_2025-01-15_143052
 ```
 
 Opens an interactive web UI at `http://127.0.0.1:8125` with:
-- **Flame graph** — Interactive, zoomable, with search/filter
-- **Function table** — Sortable by self time, total time, with heat indicators
-- **Source viewer** — Click any function to see its source code with per-line heat
+- **Flame graph / Bottom-up** — merged call tree (or its inverse), colored by module so your code stands out from libraries
+- **Timeline** — call stacks in chronological order, with an overview strip you can drag across to zoom into a time range
+- **Tasks** — samples grouped by async task (or active function for sync code)
+- **Functions / Call tree / Callers & callees** — sortable tables; click through callers and callees to navigate the code
+- **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted
+- **Frame filters** — hide import machinery, collapse library frames into one block, or show only your code
+
+Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame. Press `?` in the UI for all shortcuts.
 
 **Options:**
 - `--port N` — Port for the web server (default: 8125)

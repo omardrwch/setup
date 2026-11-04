@@ -17,6 +17,9 @@ from codexplore.utils import get_codexplorer_dir, get_run_dir
 # Directory containing the bundled web assets
 STATIC_DIR = Path(__file__).parent / "web" / "static"
 
+# The UI is served from the package directory and may change between runs
+NO_CACHE = {"Cache-Control": "no-cache"}
+
 
 def _build_source_allowlist(profile_data: dict) -> set[Path]:
     """Build a set of allowed parent directories from the profile's shared frames.
@@ -69,7 +72,7 @@ def serve_analysis(
     async def index(request: Request) -> HTMLResponse:
         """Serve the main HTML page."""
         html_path = STATIC_DIR / "index.html"
-        return HTMLResponse(html_path.read_text())
+        return HTMLResponse(html_path.read_text(), headers=NO_CACHE)
 
     async def api_meta(request: Request) -> JSONResponse:
         """Return run metadata."""
@@ -166,6 +169,7 @@ def serve_analysis(
         return Response(
             full_path.read_bytes(),
             media_type=content_type or "application/octet-stream",
+            headers=NO_CACHE,
         )
 
     # ── App ─────────────────────────────────────────────────────
