@@ -17,6 +17,7 @@ import re
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # ─── Thread names and lifetimes ─────────────────────────────────────────────
@@ -55,33 +56,47 @@ class ThreadPoller(threading.Thread):
             frontier = nxt
         return found
 
+    def _dump(self, pid: int):
+        try:
+            res = subprocess.run(
+                [self.py_spy, "dump", "--pid", str(pid), "--json", "--nonblocking"],
+                capture_output=True, text=True, timeout=15,
+            )
+            data = json.loads(res.stdout) if res.returncode == 0 and res.stdout.strip() else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            data = None
+        return data if isinstance(data, list) else None
+
     def poll_once(self) -> None:
         now = time.monotonic() - self.t0
+        todo = []
         for pid, ppid, cmd in self._descendants():
             proc = self.processes.setdefault(pid, {"ppid": ppid, "cmd": cmd, "first": now})
             proc["last"] = now
             if proc.get("fails", 0) >= 2 and not proc.get("ok"):
                 continue  # not a Python process (shell, compiler, ...)
-            try:
-                res = subprocess.run(
-                    [self.py_spy, "dump", "--pid", str(pid), "--json", "--nonblocking"],
-                    capture_output=True, text=True, timeout=15,
-                )
-                data = json.loads(res.stdout) if res.returncode == 0 and res.stdout.strip() else None
-            except (OSError, subprocess.SubprocessError, ValueError):
-                data = None
-            if not isinstance(data, list):
+            todo.append(pid)
+        # One slow process must not delay the others: short-lived threads elsewhere would be missed.
+        with ThreadPoolExecutor(max_workers=min(8, len(todo) or 1)) as ex:
+            results = list(ex.map(self._dump, todo))
+        for pid, data in zip(todo, results):
+            proc = self.processes[pid]
+            if data is None:
                 proc["fails"] = proc.get("fails", 0) + 1
                 continue
             proc["ok"] = True
             seen = time.monotonic() - self.t0
             for th in data:
                 key = f"{th.get('pid', pid)}:{th.get('thread_id')}"
-                rec = self.threads.setdefault(key, {"name": "", "os_tid": th.get("os_thread_id"), "first": seen})
+                os_tid = th.get("os_thread_id")
+                rec = self.threads.setdefault(key, {"name": "", "os_tid": os_tid, "first": seen})
                 rec["last"] = seen
                 rec["gap"] = self.gap
                 if th.get("thread_name"):
                     rec["name"] = th["thread_name"]
+                elif not rec["name"] and os_tid:
+                    # Threads started from C/C++ have no Python name; the OS name is the next best.
+                    rec["os_name"] = _os_thread_name(th.get("pid", pid), os_tid) or rec.get("os_name", "")
 
     def run(self) -> None:
         while not self.stopped.is_set():
@@ -98,6 +113,13 @@ class ThreadPoller(threading.Thread):
         self.stopped.set()
         self.join(timeout=20)
         return {"threads": self.threads, "processes": self.processes, "interval": self.interval}
+
+
+def _os_thread_name(pid: int, tid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/task/{tid}/comm").read_text().strip()
+    except OSError:
+        return ""
 
 
 # ─── Waiting detection ──────────────────────────────────────────────────────
@@ -222,6 +244,7 @@ def convert_chrometrace(trace_path: Path, out_path: Path, poll: dict | None = No
             th["stack"].pop()
 
     waits = WaitClassifier()
+    named_pids = {int(k.split(":", 1)[0]) for k in names if k.split(":", 1)[0].isdigit()}
     profiles = []
     for (pid, tid), th in threads.items():
         segs = [s for s in th["segs"] if s[1] > s[0]]
@@ -234,9 +257,13 @@ def convert_chrometrace(trace_path: Path, out_path: Path, poll: dict | None = No
         proc_last = procs_seen.get(pid, {}).get("last")
         if proc_last is not None and (last_seen is None or proc_last < last_seen):
             last_seen = proc_last
-        if last_seen is not None:
+        a, b, stk = segs[-1]
+        if not info and pid in named_pids and b == end_ts:
+            # Never seen alive by the poller, so it lived less than one poll interval: its open
+            # last stack is not evidence that it was still running at the end.
+            segs[-1] = (a, min(b, a + interval * 1e6 / 2), stk)
+        elif last_seen is not None:
             cut = (last_seen + gap) * 1e6
-            a, b, stk = segs[-1]
             if b == end_ts and cut < b:
                 segs[-1] = (a, max(a + 1, cut), stk)
 
@@ -258,7 +285,7 @@ def convert_chrometrace(trace_path: Path, out_path: Path, poll: dict | None = No
             idle.append(1 if waiting else 0)
             if not waiting:
                 active += dur
-        name = info.get("name", "")
+        name = (info.get("name") or info.get("os_name") or "").replace('"', "'")
         os_tid = info.get("os_tid") or tid
         profiles.append({
             "type": "sampled",
@@ -286,5 +313,5 @@ def convert_chrometrace(trace_path: Path, out_path: Path, poll: dict | None = No
         "codexplore": {"timeline": True, "span": round(end_ts / 1e6, 6), "processes": processes, "named_threads": len(names)},
     }
     with open(out_path, "w") as f:
-        json.dump(data, f, separators=(",", ":"))
+        f.write(json.dumps(data, separators=(",", ":")))  # dumps uses the C encoder, dump doesn't
     return {"threads": len(profiles), "frames": len(frames), "span": end_ts / 1e6}

@@ -31,6 +31,7 @@ This will:
 - `--rate N` — Sampling rate in Hz (default: 100)
 - `--subprocesses` — Also profile child processes
 - `--cpu` — Record CPU samples only (no wall-clock timestamps); see [Recording modes](#recording-modes)
+- `--trace` — Record every call in your code exactly instead of sampling; see [Trace mode](#trace-mode). With it: `--include PKG` (repeatable), `--values`, `--max-events N`
 
 ### Profile any command
 
@@ -48,6 +49,7 @@ The command must be a Python process (py-spy attaches to the Python interpreter 
 - `--rate N` — Sampling rate in Hz (default: 100)
 - `--subprocesses` — Also profile child processes
 - `--cpu` — Record CPU samples only (no wall-clock timestamps)
+- `--trace`, `--include PKG`, `--values`, `--max-events N` — exact tracing, see [Trace mode](#trace-mode)
 
 Options go after the subcommand: `codexplore exec --subprocesses -- cmd`.
 
@@ -67,6 +69,55 @@ blocks without releasing a recognisable Python frame will look busy.
 `--cpu` records the older CPU-only format, where idle time is dropped. Use it for long runs
 where you only care about hot code.
 
+### Trace mode
+
+```bash
+codexplore run --trace my_script.py
+codexplore exec --trace --subprocesses -- python -m mypkg.train
+codexplore run --trace --include transformers my_script.py
+```
+
+`--trace` swaps the sampler for an in-process tracer, so nothing is missed between samples:
+every call of **your code** is recorded with its exact start and end, plus the **first call
+out of it** into a library or builtin (`model.generate`, `time.sleep`, `queue.get`, …), whose
+inside is not traced. That gives you, on top of all the usual views:
+
+- **Exact call counts** — in the Functions table (sortable *Calls* column), tooltips, Callers &
+  callees, Graph nodes and edges, and the source panel's call chips (`×42` calls from this line)
+- **Signatures** — the argument and return types each function was called with, shown at the
+  top of the source panel and in tooltips: `forward(x: Tensor[8,512] bfloat16 cuda:0) → Tensor[8,512,32000] bfloat16 cuda:0`.
+  Tensors and arrays (torch, numpy, jax, cupy, tensorflow) show shape, dtype and device;
+  containers show their length and element type; dataclasses and namedtuples their fields
+- **Exceptions** — which functions raised what, and how often
+- **Calls view** (key `8`) — every call of the current thread in order, indented by depth,
+  with arguments, return values, library calls and waits. Runs of repeated calls fold into one
+  row (`fetch ×128`); click to unfold. Click a call to open it and see what every other thread
+  did meanwhile; double-click to show it on the timeline. Search (`/`) filters the list
+- The timeline, Meanwhile and Threads views use exact times instead of samples, and hovering
+  a call shows the arguments and return value of that particular call
+
+**Scope.** Your code is everything under the script's directory (for `exec`, the current
+directory), except virtualenvs, `site-packages` and the standard library. `--include PKG` also
+traces inside an installed package (repeatable). Subprocesses are traced with `--subprocesses`
+(`multiprocessing` with spawn or fork, and Python children started with `subprocess`). Works on
+Python 3.10+; 3.12+ uses `sys.monitoring` (faster), older versions `sys.setprofile`, where the
+exception type isn't available (shown as *exception*).
+
+**Privacy.** By default only types and shapes are recorded, never values. `--values` adds
+short reprs of numbers, strings and small tuples; arguments whose name looks secret
+(`password`, `token`, `api_key`, …) and values that look like credentials (`sk-…`, `ghp_…`,
+JWTs, private keys, …) are recorded as `<redacted>`. User-defined `__repr__` is never called.
+
+**Overhead.** Roughly 5 µs per traced call: negligible when time goes into libraries, GPUs or
+I/O, up to ~10× (3.12+) or ~15× (3.10/3.11) on code made of tiny pure-Python functions.
+Calls into libraries shorter than 20 µs are only counted, not recorded one by one. After
+`--max-events` (default 5M) individual calls stop being recorded but are still counted; the
+UI says so.
+
+**Limits.** Native threads that never run Python code are invisible. Code inside libraries is
+not traced unless you `--include` it. The target must be started by codexplore (it can't
+attach to a running process).
+
 ### Analyze a run
 
 ```bash
@@ -85,8 +136,9 @@ Opens an interactive web UI at `http://127.0.0.1:8125` with:
 - **Functions / Call tree / Callers & callees** — sortable tables; click through callers and callees to navigate the code
 - **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted; each line shows chips for the functions it calls, so you can follow the code by clicking, with back/forward history
 - **Frame filters** — hide import machinery, collapse library frames into one block, or show only your code
+- **Calls** — trace-mode runs only: every call in order with its arguments, see [Trace mode](#trace-mode)
 
-Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`7` switch views. The toolbar's ← → buttons (or Alt + ←/→, or the mouse back/forward buttons) step back and forward through where you've been: view, thread, zoom, selection, Map drill-down and time window; the source panel's own ← → step through visited code only. Drag a column edge in the tables, or the edge of the timeline's name gutter, to resize it (double-click to reset). Press `?` in the UI for all shortcuts.
+Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`8` switch views. The toolbar's ← → buttons (or Alt + ←/→, or the mouse back/forward buttons) step back and forward through where you've been: view, thread, zoom, selection, Map drill-down and time window; the source panel's own ← → step through visited code only. Drag a column edge in the tables, or the edge of the timeline's name gutter, to resize it (double-click to reset). Press `?` in the UI for all shortcuts.
 
 **Options:**
 - `--port N` — Port for the web server (default: 8125)
@@ -132,3 +184,9 @@ Everything runs locally. The web UI is served from `127.0.0.1` with no external 
 3. **`codexplore analyze`** starts a local Starlette server that serves a self-contained web UI
 4. The web UI fetches the profile JSON and renders flame graphs + function tables via Canvas
 5. Clicking a function loads its source code from disk via a local API endpoint
+
+With `--trace`, step 1 runs the target directly instead, with a small `sitecustomize` on
+`PYTHONPATH` that starts the tracer (and then runs your own `sitecustomize`, if any). Each
+process appends its calls to `codexplorer/<run_id>/trace/<pid>.bin`; afterwards they are
+turned into the same timeline profile plus `calls.json` (call spans, counts, signatures), and
+the raw files are deleted.

@@ -173,7 +173,11 @@ def _record(
             print("   Note: thread names unavailable (py-spy dump could not attach); threads are labelled by id.")
 
     _enrich_frame_names(profile_output)
+    _finish_meta(meta, meta_file, profile_output)
+    return run_id
 
+
+def _finish_meta(meta: dict, meta_file: Path, profile_output: Path) -> None:
     try:
         profile_data = json.loads(profile_output.read_text())
         meta["profile_format"] = "speedscope"
@@ -183,6 +187,86 @@ def _record(
     except (OSError, ValueError):
         pass
     meta_file.write_text(json.dumps(meta, indent=2))
+
+
+TRACER_DIR = Path(__file__).parent / "tracer"
+
+
+def _trace_record(target: list[str], cwd: str, root: str, meta: dict, trace: dict, subprocesses: bool, label: str) -> str | None:
+    """Run `target` with the in-process tracer, then convert its output (exact calls)."""
+    from codexplore.tracefmt import convert_exact_trace
+
+    codexplorer_dir = get_codexplorer_dir(None)
+    run_id = generate_run_id()
+    run_dir = get_run_dir(codexplorer_dir, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir = run_dir / "trace"
+    profile_output = run_dir / "profile.json"
+
+    meta.update({
+        "run_id": run_id,
+        "subprocesses": subprocesses,
+        "mode": "trace",
+        "include": list(trace.get("include") or []),
+        "values": bool(trace.get("values")),
+        "timestamp": datetime.now().isoformat(),
+        "cwd": os.getcwd(),
+    })
+    meta_file = run_dir / "meta.json"
+    meta_file.write_text(json.dumps(meta, indent=2))
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(TRACER_DIR), *filter(None, [env.get("PYTHONPATH")])])
+    config = {
+        "out": str(trace_dir),
+        "root": root,
+        "include": list(trace.get("include") or []),
+        "values": bool(trace.get("values")),
+        "subprocesses": subprocesses,
+        "max_events": int(trace.get("max_events") or 5_000_000),
+    }
+    env["CODEXPLORE_TRACE"] = json.dumps(config)
+
+    print(f"🔍 Tracing: {label}")
+    print("   Mode:      exact trace (every call in your code, plus its first library call)")
+    print(f"   Scope:     {root}" + (f" + {', '.join(config['include'])}" if config["include"] else ""))
+    if config["values"]:
+        print("   Values:    short value reprs are recorded (secret-looking names/values redacted)")
+    print(f"   Output:    {run_dir}")
+    print()
+
+    t0 = time.time_ns()
+    try:
+        proc = subprocess.Popen(target, cwd=cwd, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+        try:
+            returncode = proc.wait()
+        except KeyboardInterrupt:
+            print("\n⚠️  Interrupted. Waiting for the program to write its trace...")
+            returncode = proc.wait()
+    except OSError as e:
+        print(f"Error: could not start {target[0]}: {e}", file=sys.stderr)
+        return None
+    if returncode != 0:
+        print(f"\n⚠️  Process exited with code {returncode}. Trace may be incomplete.", file=sys.stderr)
+
+    print("   Building the timeline...", flush=True)
+    try:
+        summary = convert_exact_trace(trace_dir, profile_output, run_dir / "calls.json", t0)
+    except Exception as e:  # keep the raw trace so nothing is lost
+        print(f"Error: could not convert {trace_dir}: {e}", file=sys.stderr)
+        meta["error"] = f"Trace conversion failed: {e}"
+        meta_file.write_text(json.dumps(meta, indent=2))
+        return None
+    shutil.rmtree(trace_dir, ignore_errors=True)
+    procs = f" in {summary['processes']} processes" if summary["processes"] > 1 else ""
+    print(f"   {summary['calls']:,} calls to {summary['functions']} functions, "
+          f"{summary['threads']} threads{procs} over {summary['span']:.1f} s ({summary['named']} named)")
+    if summary["truncated"]:
+        print(f"   ⚠️  Event cap reached ({config['max_events']:,}); later calls were counted but not recorded. Raise --max-events.")
+    for err in summary["errors"]:
+        print(f"   ⚠️  Tracer stopped early: {err}", file=sys.stderr)
+    meta["calls_file"] = "calls.json"
+    _finish_meta(meta, meta_file, profile_output)
     return run_id
 
 
@@ -193,8 +277,9 @@ def run_profile(
     rate: int = 100,
     subprocesses: bool = False,
     cpu: bool = False,
+    trace: dict | None = None,
 ) -> str | None:
-    """Run py-spy on the given script and save results.
+    """Run py-spy (or the tracer, with `trace`) on the given script and save results.
 
     Returns the run_id on success, None on failure.
     """
@@ -210,12 +295,15 @@ def run_profile(
         print(f"Error: {e}", file=sys.stderr)
         return None
 
+    meta = {"script": str(script_path), "script_args": script_args, "python": python_path}
+    print(f"   Python:    {python_path}")
+    if trace is not None:
+        target = [python_path, str(script_path), *script_args]
+        return _trace_record(target, str(script_path.parent), str(script_path.parent), meta, trace, subprocesses, script_path.name)
+
     py_spy = _find_py_spy()
     if not py_spy:
         return None
-
-    meta = {"script": str(script_path), "script_args": script_args, "python": python_path}
-    print(f"   Python:    {python_path}")
     return _record(
         py_spy, [python_path, str(script_path), *script_args], str(script_path.parent),
         meta, rate, subprocesses, cpu, script_path.name,
@@ -227,8 +315,9 @@ def exec_profile(
     rate: int = 100,
     subprocesses: bool = False,
     cpu: bool = False,
+    trace: dict | None = None,
 ) -> str | None:
-    """Run py-spy on an arbitrary command (must be a Python process).
+    """Run py-spy (or the tracer, with `trace`) on an arbitrary command (must be a Python process).
 
     Returns the run_id on success, None on failure.
     """
@@ -241,10 +330,12 @@ def exec_profile(
         print(f"Error: Command not found: {command[0]}", file=sys.stderr)
         return None
 
+    command_str = " ".join(command)
+    meta = {"command": command_str, "command_args": command}
+    if trace is not None:
+        return _trace_record([executable, *command[1:]], os.getcwd(), os.getcwd(), meta, trace, subprocesses, command_str)
+
     py_spy = _find_py_spy()
     if not py_spy:
         return None
-
-    command_str = " ".join(command)
-    meta = {"command": command_str, "command_args": command}
     return _record(py_spy, [executable, *command[1:]], os.getcwd(), meta, rate, subprocesses, cpu, command_str)

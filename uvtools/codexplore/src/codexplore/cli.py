@@ -12,6 +12,31 @@ CPU_HELP = (
 )
 
 
+def trace_options(f):
+    """Options shared by `run` and `exec` for exact tracing."""
+    f = click.option("--max-events", default=5_000_000, type=int, show_default=True,
+                     help="With --trace: stop recording individual calls after this many events (counts continue).")(f)
+    f = click.option("--values", is_flag=True, default=False,
+                     help="With --trace: also record short reprs of scalar/string arguments and return values "
+                          "(secret-looking names and values are redacted). Off by default: only types and shapes.")(f)
+    f = click.option("--include", multiple=True, metavar="PKG",
+                     help="With --trace: also trace inside this installed package (repeatable), e.g. --include transformers.")(f)
+    f = click.option("--trace", "trace", is_flag=True, default=False,
+                     help="Record every call in your code exactly (in-process tracer instead of sampling): "
+                          "call counts, order, argument types/shapes, exceptions.")(f)
+    return f
+
+
+def _trace_cfg(trace, cpu, include, values, max_events):
+    if not trace:
+        if include or values:
+            raise click.UsageError("--include and --values need --trace.")
+        return None
+    if cpu:
+        raise click.UsageError("--trace and --cpu are different recording modes; pick one.")
+    return {"include": list(include), "values": values, "max_events": max_events}
+
+
 @click.group()
 @click.version_option()
 def main():
@@ -40,7 +65,8 @@ def main():
     help="Profile subprocesses as well.",
 )
 @click.option("--cpu", is_flag=True, default=False, help=CPU_HELP)
-def run_cmd(script, script_args, python, rate, subprocesses, cpu):
+@trace_options
+def run_cmd(script, script_args, python, rate, subprocesses, cpu, trace, include, values, max_events):
     """Profile a Python script.
 
     Usage: codexplore run <script.py> [-- script args...]
@@ -52,6 +78,7 @@ def run_cmd(script, script_args, python, rate, subprocesses, cpu):
         rate=rate,
         subprocesses=subprocesses,
         cpu=cpu,
+        trace=_trace_cfg(trace, cpu, include, values, max_events),
     )
     if run_id:
         click.echo(f"\n✅ Profile saved. Run ID: {click.style(run_id, fg='green', bold=True)}")
@@ -76,17 +103,20 @@ def run_cmd(script, script_args, python, rate, subprocesses, cpu):
     help="Profile subprocesses as well.",
 )
 @click.option("--cpu", is_flag=True, default=False, help=CPU_HELP)
-def exec_cmd(command, rate, subprocesses, cpu):
+@trace_options
+def exec_cmd(command, rate, subprocesses, cpu, trace, include, values, max_events):
     """Profile any command (must be a Python process).
 
     Usage: codexplore exec -- harbor run <task>
            codexplore exec --rate 200 -- uvicorn app:main
+           codexplore exec --trace -- python -m mypkg.train
     """
     run_id = exec_profile(
         command=list(command),
         rate=rate,
         subprocesses=subprocesses,
         cpu=cpu,
+        trace=_trace_cfg(trace, cpu, include, values, max_events),
     )
     if run_id:
         click.echo(f"\n✅ Profile saved. Run ID: {click.style(run_id, fg='green', bold=True)}")

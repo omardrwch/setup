@@ -85,6 +85,14 @@ def serve_analysis(
         """Return the profile data (speedscope layout, possibly with timeline extensions)."""
         return Response(profile_file.read_bytes(), media_type="application/json")
 
+    calls_file = run_dir / "calls.json"
+
+    async def api_calls(request: Request) -> Response:
+        """Return the exact call data of a trace-mode run."""
+        if not calls_file.exists():
+            return JSONResponse({"error": "not a trace-mode run"}, status_code=404)
+        return Response(calls_file.read_bytes(), media_type="application/json")
+
     async def api_source(request: Request) -> JSONResponse:
         """Return source code for a given file path.
 
@@ -180,6 +188,7 @@ def serve_analysis(
             Route("/", index),
             Route("/api/meta", api_meta),
             Route("/api/profile", api_profile),
+            Route("/api/calls", api_calls),
             Route("/api/source", api_source),
             Route("/static/{path:path}", static_file),
         ],

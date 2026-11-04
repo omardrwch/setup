@@ -60,6 +60,7 @@
             <button data-view="map" title="Treemap of time by package, file and function (5)">Map</button>
             <button data-view="graph" title="Callers and callees around the selected function (6)">Graph</button>
             <button data-view="threads" title="All processes and threads: entry points and where each spends time (7)">Threads</button>
+            <button data-view="calls" id="view-calls" hidden title="Every call of this thread in order, with argument types (8) · trace mode">Calls</button>
           </div>
           <div class="chart-info" id="chart-info"></div>
           <div class="grow"></div>
@@ -76,6 +77,11 @@
           <canvas></canvas>
           <svg class="graph" id="graph" hidden></svg>
           <div class="threads-wrap" id="threads-wrap" hidden><svg class="graph threads" id="threads"></svg></div>
+          <div class="calls-wrap" id="calls-wrap" hidden>
+            <div class="cv-info" id="cv-info"></div>
+            <div class="grid-head cv-cols"><div class="num">Start</div><div class="num">Duration</div><div>Call</div></div>
+            <div class="vlist" id="cv-list"></div>
+          </div>
           <div class="hbar" hidden><div class="thumb"></div></div>
           <div class="vbar" hidden><div class="thumb"></div></div>
           <div class="empty" id="plot-empty" hidden></div>
@@ -132,6 +138,7 @@
         </div>
         <button class="icon-btn" id="src-close" title="Close (Esc)">✕</button>
       </div>
+      <div class="side-sig" id="src-sig" hidden></div>
       <div class="src-body" id="src-body"></div>
     </aside>
   </main>
@@ -168,7 +175,8 @@
       <div><kbd>Drag time axis</kbd><span>Timeline (all threads): pick a time window to compare threads</span></div>
       <div><kbd>Click a name</kbd><span>Timeline (all threads): expand / collapse a thread or process</span></div>
       <div><kbd>Drag column edge</kbd><span>Resize table columns or the timeline's name gutter (double-click the edge to reset)</span></div>
-      <div><kbd>1</kbd> … <kbd>7</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph · Threads</span></div>
+      <div><kbd>1</kbd> … <kbd>8</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph · Threads · Calls (trace mode)</span></div>
+      <div><kbd>Calls view</kbd><span>Click a call to open it and see what other threads did meanwhile · double-click to show it on the timeline · click a folded row to unfold</span></div>
       <div><kbd>→ chips</kbd><span>In the source panel, click what a line calls to jump into it</span></div>
       <div><kbd>Alt + ←</kbd> <kbd>Alt + →</kbd><span>Back / forward: view, thread, zoom, selection and time window (also the ← → buttons in the toolbar, or mouse back / forward)</span></div>
       <div><kbd>← → in source panel</kbd><span>Back / forward through visited code only</span></div>

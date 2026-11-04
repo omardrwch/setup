@@ -120,8 +120,8 @@ const S = {
   gutter: clamp(+store.get("gutter", GUTTER) || GUTTER, 120, 900),
   tl: null,   // wall-clock timeline data, for runs recorded with timestamps
 };
-const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph", "threads"];
-const STATIC_VIEWS = new Set(["map", "graph", "threads"]);
+const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph", "threads", "calls"];
+const STATIC_VIEWS = new Set(["map", "graph", "threads", "calls"]);
 if (!VIEWS.includes(S.view)) S.view = "flame";
 if (!["functions", "tree", "calls", "phases", "during"].includes(S.tab)) S.tab = "functions";
 
@@ -203,6 +203,84 @@ function synthFn(key, name, cat, group) {
   return fo.id;
 }
 
+/* ═══════════════════════════ Exact calls (trace mode) ═══════════════════════════ */
+
+// Span flags, as written by tracefmt.py
+const FL_RESUMED = 1, FL_EXC = 2, FL_BOUNDARY = 4, FL_C = 8, FL_WAIT = 16, FL_SUSPENDED = 32;
+let CX = null;
+
+function buildCalls(data) {
+  const fnOf = new Int32Array(data.funcs.length);
+  data.funcs.forEach(([name, file, line], g) => {
+    const key = name + "\u0000" + file;
+    let fo = fnByKey.get(key);
+    if (!fo) { fo = makeFn(name, file, line); fnByKey.set(key, fo); }
+    fnOf[g] = fo.id;
+  });
+  const n = FN.length, calls = new Float64Array(n), ctime = new Float64Array(n), edges = new Map();
+  for (const [g, [c, t]] of Object.entries(data.counts || {})) { calls[fnOf[+g]] += c; ctime[fnOf[+g]] += t; }
+  for (const [a, b, c, t] of data.edges || []) {
+    const k = cxKey(a >= 0 ? fnOf[a] : -1, fnOf[b]), e = edges.get(k);
+    if (e) { e[0] += c; e[1] += t; } else edges.set(k, [c, t]);
+  }
+  const str = i => (i >= 0 ? data.strings[i] : "");
+  const sigs = new Map(), excs = new Map();
+  for (const [g, list] of Object.entries(data.sigs || {})) sigs.set(fnOf[+g], list.map(([a, r, c]) => ({ args: str(a), ret: str(r), n: c })));
+  for (const [g, list] of Object.entries(data.excs || {})) excs.set(fnOf[+g], list);
+  // Exact calls per source line: caller file → line → callee → count
+  const sites = new Map(), byProfile = new Map();
+  for (const t of data.threads || []) {
+    byProfile.set(t.profile, t);
+    t.f = Int32Array.from(t.fn, g => fnOf[g]);
+    for (let i = 0; i < t.f.length; i++) {
+      const p = t.parent[i], ln = t.line[i];
+      if (p < 0 || ln <= 0 || (t.flags[i] & FL_RESUMED)) continue;
+      const file = FN[t.f[p]].file;
+      let fm = sites.get(file); if (!fm) sites.set(file, fm = new Map());
+      let lm = fm.get(ln); if (!lm) fm.set(ln, lm = new Map());
+      lm.set(t.f[i], (lm.get(t.f[i]) || 0) + 1);
+    }
+  }
+  CX = { calls, ctime, edges, sigs, excs, sites, byProfile, str, truncated: !!data.truncated, spansTruncated: !!data.spans_truncated };
+}
+
+const cxKey = (a, b) => (a + 1) * 1048576 + b;
+const fmtCount = c => c >= 1e6 ? (c / 1e6).toFixed(c >= 1e7 ? 0 : 1) + "M" : c >= 1e4 ? Math.round(c / 1e3) + "k" : Math.round(c).toLocaleString();
+const cxEdge = (a, b) => (CX && CX.edges.get(cxKey(a, b))) || null;
+const cxSig = s => "(" + (s.args || "").replace(/^\(|\)$/g, "") + ")" + (s.ret ? " → " + s.ret : "");
+
+// Tooltip rows with the exact numbers for a function.
+function cxRows(fn) {
+  if (!CX || !(CX.calls[fn] > 0)) return [];
+  const c = CX.calls[fn], rows = [["Calls", "<b>" + fmtCount(c) + "</b>" + (c > 1 ? " · avg " + fmtDur(CX.ctime[fn] / c) : "") + ' <span class="t-dim">all threads</span>']];
+  const sg = CX.sigs.get(fn);
+  if (sg && sg.length) rows.push(["Signature", esc(cxSig(sg[0]))]);
+  const ex = CX.excs.get(fn);
+  if (ex && ex.length) rows.push(["Raised", ex.map(([e, k]) => esc(e) + " ×" + fmtCount(k)).join(", ")]);
+  return rows;
+}
+
+// The exact call of `fn` running on profile `i` at time `t` (spans are in start order).
+function cxSpanAt(i, fn, t) {
+  const th = CX && CX.byProfile.get(i);
+  if (!th) return -1;
+  let lo = 0, hi = th.t0.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (th.t0[m] <= t + 1e-9) lo = m + 1; else hi = m; }
+  let k = lo - 1;
+  for (let steps = 0; k >= 0 && steps < 5000; k--, steps++) if (th.f[k] === fn && th.t1[k] >= t - 1e-9) return k;
+  return -1;
+}
+
+function cxSpanRows(i, k) {
+  const th = CX.byProfile.get(i), rows = [], fl = th.flags[k];
+  if (th.args[k] >= 0) rows.push(["Arguments", esc(CX.str(th.args[k]))]);
+  if (th.ret[k] >= 0) rows.push(["Returned", esc(CX.str(th.ret[k]))]);
+  if (fl & FL_EXC) rows.push(["Raised", '<span class="t-exc">' + esc(CX.str(th.exc[k]) || "exception") + "</span>"]);
+  if (fl & FL_SUSPENDED) rows.push(["Suspended", "yielded / awaited"]);
+  if (fl & FL_RESUMED) rows.push(["Resumed", "continues an earlier call"]);
+  return rows;
+}
+
 /* ═══════════════════════════ Processes & threads ═══════════════════════════ */
 
 let PROFILES = null, PROCS = null;
@@ -246,7 +324,7 @@ function profileInfo() {
     if (!PROCS.has(pid)) PROCS.set(pid, { pid, cmd: "", parent: 0, threads: [], total: 0 });
     const name = m[3] || "", tid = m[2] ? +m[2] : i;
     return {
-      i, pid, tid, name, label: name || (tid === pid ? "MainThread" : "Thread " + tid), total, timed, scale: timed ? scale : 1,
+      i, pid, tid, name, label: name || (tid === pid ? "MainThread" : tid > 0xffffffff ? "unnamed thread …" + (tid % 0x10000).toString(16) : "Thread " + tid), total, timed, scale: timed ? scale : 1,
       secs: timed ? total * scale : total, wall: timed ? wall * scale : wall,
     };
   });
@@ -1360,13 +1438,14 @@ function laneTip(it) {
     return users.length ? '<div class="t-stack">' + users.join("") + "</div>" : "";
   };
   const hint = '<div class="t-hint">Click: select &amp; see what every other thread did meanwhile · Double-click: zoom</div>';
+  const exact = (i, fn, t) => { const k = cxSpanAt(i, fn, t); return k >= 0 ? cxSpanRows(i, k) : []; };
   if (it.kind === "lrun") {
     const r = it.run;
     return fnHeader(r.fn) + grid([
       ["Thread", where(it.lane)],
       [r.idle ? "Waiting" : "Running", "<b>" + fmtDur(r.te - r.ts) + "</b>"],
       ["From", fmtAxis(r.ts, 0.001) + " → " + fmtAxis(r.te, 0.001)],
-    ].concat(r.idle && it.s >= 0 && FN[it.lane.d.leaf[it.s]] ? [["Blocked in", esc(FN[it.lane.d.leaf[it.s]].disp)]] : [])) + stackAt(it.lane.d, it.s) + hint;
+    ].concat(r.idle && it.s >= 0 && FN[it.lane.d.leaf[it.s]] ? [["Blocked in", esc(FN[it.lane.d.leaf[it.s]].disp)]] : [], exact(it.lane.d.i, r.fn, it.t))) + stackAt(it.lane.d, it.s) + hint;
   }
   if (it.kind === "lblock") {
     const b = it.block, busy = b.wall - b.waitW;
@@ -1376,7 +1455,7 @@ function laneTip(it) {
       ["Running", fmtDur(busy) + " · " + fmtPct(busy, b.wall || 1)],
       ["Waiting", fmtDur(b.waitW) + " · " + fmtPct(b.waitW, b.wall || 1)],
       ["From", fmtAxis(b.ts, 0.001) + " → " + fmtAxis(b.te, 0.001)],
-    ]) + hint;
+    ].concat(exact(it.lane.d.i, b.fn, it.t), cxRows(b.fn))) + hint;
   }
   if (it.kind === "lprocs") {
     const busy = [];
@@ -1432,6 +1511,7 @@ function laneClick(it) {
     if (it.kind === "lrun") line = it.s >= 0 ? d.focusLine[it.s] : 0;
     else { const m = new Map(); for (let s = src.s0; s < src.s1; s++) { const ln = d.sLine[d.offs[s] + src.d]; if (ln > 0) m.set(ln, (m.get(ln) || 0) + d.t1[s] - d.t0[s]); } line = maxKey(m); }
     switchThread(d.i, true);
+    if (CX) { cvData(); CV.focus = cxSpanAt(d.i, src.fn, it.t); }
     select(src.fn, line, { reveal: false });
     setWindow({ t0: src.ts, t1: src.te, fn: src.fn, lane: d.i, waiting: it.kind === "lrun" ? !!src.idle : src.waitW >= 0.5 * src.wall });
     return true;
@@ -1956,13 +2036,14 @@ function renderGraph() {
     const sw = (1.2 + 9 * Math.sqrt(e.w / maxE)).toFixed(1);
     const d = "M" + x1 + "," + y1 + " C" + (x1 + dx) + "," + y1 + " " + (x2 - dx) + "," + y2 + " " + x2 + "," + y2;
     h += '<path class="gedge' + (back ? " back" : "") + '" data-from="' + e.from + '" data-to="' + e.to + '" d="' + d + '" stroke-width="' + sw + '"/>';
-    if (e.w >= T.total * 0.02 && !back) h += '<text class="g-elabel" x="' + ((x1 + x2) / 2) + '" y="' + ((y1 + y2) / 2 - 4) + '">' + fmtPct(e.w) + "</text>";
+    const ec = cxEdge(e.from, e.to);
+    if ((e.w >= T.total * 0.02 || ec) && !back) h += '<text class="g-elabel" x="' + ((x1 + x2) / 2) + '" y="' + ((y1 + y2) / 2 - 4) + '">' + (e.w >= T.total * 0.02 ? fmtPct(e.w) : "") + (ec ? (e.w >= T.total * 0.02 ? " · " : "") + "×" + fmtCount(ec[0]) : "") + "</text>";
   }
   const cw = 6.6;
   for (const { x, y, n } of pos.values()) {
     const fo = FN[n.fn], isC = n.fn === center, maxC = Math.floor((NW - 16) / cw);
     const nm = fo.disp.length > maxC ? fo.disp.slice(0, maxC - 1) + "…" : fo.disp;
-    const sub = "total " + fmtPct(T.tot[n.fn]) + " · self " + fmtPct(T.self[n.fn]) + (fo.cat !== "user" ? " · " + CAT_LABEL[fo.cat] : "");
+    const sub = (CX && CX.calls[n.fn] ? "×" + fmtCount(CX.calls[n.fn]) + " · " : "") + "total " + fmtPct(T.tot[n.fn]) + " · self " + fmtPct(T.self[n.fn]) + (fo.cat !== "user" ? " · " + CAT_LABEL[fo.cat] : "");
     const dim = S.match && !S.match[n.fn];
     h += '<g class="gnode' + (isC ? " center" : "") + (dim ? " dim" : "") + '" data-fn="' + n.fn + '" transform="translate(' + x + "," + y + ')">' +
       '<rect width="' + NW + '" height="' + NH + '" rx="7" fill="' + fillFor(n.fn) + '"/>' +
@@ -1988,14 +2069,15 @@ function bindGraph() {
     const g = e.target.closest(".gnode"), p = e.target.closest(".gedge");
     if (g) {
       const fn = +g.dataset.fn;
-      if (fn !== S.hoverFn) { setHover(fn); showTip(fnHeader(fn) + grid([["Total", "<b>" + fmtV(T.tot[fn]) + "</b> · " + fmtPct(T.tot[fn])], ["Self", fmtV(T.self[fn]) + " · " + fmtPct(T.self[fn])]]) + '<div class="t-hint">Click to center the graph here and view source</div>', e); }
+      if (fn !== S.hoverFn) { setHover(fn); showTip(fnHeader(fn) + grid([["Total", "<b>" + fmtV(T.tot[fn]) + "</b> · " + fmtPct(T.tot[fn])], ["Self", fmtV(T.self[fn]) + " · " + fmtPct(T.self[fn])], ...cxRows(fn)]) + '<div class="t-hint">Click to center the graph here and view source</div>', e); }
       else moveTip(e);
     } else if (p) {
       const a = +p.dataset.from, b = +p.dataset.to, ed = (getEdges().out.get(a) || []).find(x => x.to === b);
       setHover(-1);
       if (ed) {
         const site = maxKey(ed.lines);
-        showTip('<div class="t-name">' + esc(FN[a].disp) + " → " + esc(FN[b].disp) + "</div>" + grid([["Time in call", "<b>" + fmtV(ed.w) + "</b> · " + fmtPct(ed.w)], ["Of callee total", fmtPct(ed.w, T.tot[b])]].concat(site ? [["Call site", esc(FN[a].rel) + ":" + site]] : [])) + '<div class="t-hint">Click to open the call site</div>', e);
+        const ec = cxEdge(a, b);
+        showTip('<div class="t-name">' + esc(FN[a].disp) + " → " + esc(FN[b].disp) + "</div>" + grid([["Time in call", "<b>" + fmtV(ed.w) + "</b> · " + fmtPct(ed.w)], ["Of callee total", fmtPct(ed.w, T.tot[b])]].concat(ec ? [["Calls", "<b>" + fmtCount(ec[0]) + '</b> <span class="t-dim">all threads</span>']] : [], site ? [["Call site", esc(FN[a].rel) + ":" + site]] : [])) + '<div class="t-hint">Click to open the call site</div>', e);
       }
     } else { hideTip(); setHover(-1); }
   });
@@ -2241,6 +2323,146 @@ function bindThreads() {
 /* ═══════════════════════════ Tooltip ═══════════════════════════ */
 
 const tipEl = $("#tip");
+/* ═══════════════════════════ Calls view (trace mode) ═══════════════════════════ */
+
+// Every recorded call of the current thread in order, indented by depth. Runs of 3+ consecutive
+// calls to the same function from the same caller fold into one row.
+const CV = { thread: -1, data: null, collapsed: new Set(), openRuns: new Set(), list: null, focus: -1 };
+
+function cvData() {
+  if (CV.thread === S.thread && CV.data !== null) return CV.data;
+  CV.thread = S.thread; CV.collapsed.clear(); CV.openRuns.clear(); CV.focus = -1;
+  const th = CX && CX.byProfile.get(S.thread);
+  if (!th) return (CV.data = false);
+  const n = th.f.length, depth = new Int32Array(n), end = new Int32Array(n);
+  for (let i = 0; i < n; i++) { const p = th.parent[i]; depth[i] = p >= 0 ? depth[p] + 1 : 0; end[i] = i; }
+  for (let i = n - 1; i >= 0; i--) { const p = th.parent[i]; if (p >= 0 && end[i] > end[p]) end[p] = end[i]; }
+  return (CV.data = { th, n, depth, end });
+}
+
+function cvItems() {
+  const d = cvData();
+  if (!d) return [];
+  const { th, n, end } = d, out = [];
+  if (S.match) { for (let i = 0; i < n; i++) if (S.match[th.f[i]]) out.push(i); return out; }
+  const openUntil = new Map();   // parent span → last sibling index of an expanded run
+  let i = 0;
+  while (i < n) {
+    const p = th.parent[i];
+    if (!(openUntil.get(p) >= i)) {
+      let j = i, cnt = 0, last = i;
+      while (j < n && th.parent[j] === p && th.f[j] === th.f[i]) { cnt++; last = j; j = end[j] + 1; }
+      if (cnt >= 3) {
+        if (CV.openRuns.has(i)) openUntil.set(p, last);
+        else { out.push({ run: i, last, count: cnt }); i = end[last] + 1; continue; }
+      }
+    }
+    out.push(i);
+    i = CV.collapsed.has(i) ? end[i] + 1 : i + 1;
+  }
+  return out;
+}
+
+const cvSpan = it => (typeof it === "object" ? it.run : it);
+
+function renderCvRow(it) {
+  const { th, depth, end } = CV.data, i = cvSpan(it), fn = th.f[i], fo = FN[fn], fl = th.flags[i];
+  const pad = '<span class="cv-pad" style="width:' + Math.min(depth[i] * 14, 600) + 'px"></span>';
+  const dot = '<span class="dot" style="background:' + fillFor(fn) + '"></span>';
+  if (typeof it === "object") {
+    let tot = 0, resumes = 0;
+    for (let k = i; k <= it.last; k = end[k] + 1) { tot += th.t1[k] - th.t0[k]; if (th.flags[k] & FL_RESUMED) resumes++; }
+    const calls = it.count - resumes;
+    return '<div class="num loc">' + fmtAxis(th.t0[i], 1e-4) + '</div><div class="num">' + fmtDur(tot) + "</div>" +
+      '<div class="cv-call">' + pad + '<span class="caret" data-run="1">▸</span>' + dot + '<span class="nm">' + esc(fo.disp) + '</span><em class="ccount">×' + fmtCount(calls || it.count) +
+      '</em><span class="loc">' + (resumes && calls ? "calls + " + fmtCount(resumes) + " resumes" : resumes ? "resumes" : "repeated calls · " + fmtDur(tot / it.count) + " avg") + " · click to expand</span></div>";
+  }
+  const kids = end[i] > i, caret = kids ? (CV.collapsed.has(i) ? "▸" : "▾") : "";
+  const args = th.args[i] >= 0 ? CX.str(th.args[i]) : fl & FL_BOUNDARY ? "" : fl & FL_RESUMED ? "" : "(…)";
+  const ret = th.ret[i] >= 0 ? " → " + CX.str(th.ret[i]) : "";
+  const badges = (fl & FL_BOUNDARY ? '<span class="cv-b" title="First call outside your code (not traced inside)">library</span>' : "") +
+    (fl & FL_WAIT && end[i] === i ? '<span class="cv-b wait">waiting</span>' : "") + (fl & FL_RESUMED ? '<span class="cv-b">resumed</span>' : "") +
+    (fl & FL_SUSPENDED ? '<span class="cv-b">suspended</span>' : "") + (fl & FL_EXC ? '<span class="cv-b exc">✕ ' + esc(CX.str(th.exc[i]) || "raised") + "</span>" : "");
+  const site = th.parent[i] >= 0 && th.line[i] > 0 ? '<span class="loc">L' + th.line[i] + "</span>" : "";
+  return '<div class="num loc">' + fmtAxis(th.t0[i], 1e-4) + '</div><div class="num">' + fmtDur(th.t1[i] - th.t0[i]) + "</div>" +
+    '<div class="cv-call">' + pad + '<span class="caret" data-caret="1">' + caret + "</span>" + dot + '<span class="nm">' + esc(fo.disp) + "</span>" +
+    '<span class="cv-sig">' + esc(args + ret) + "</span>" + badges + site + "</div>";
+}
+
+function renderCallsView(keepScroll) {
+  const wrap = $("#calls-wrap");
+  if (S.view !== "calls" || !CX) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  if (!CV.list) CV.list = new VList($("#cv-list"), 22, renderCvRow, it => "cv-cols" + (cvSpan(it) === CV.focus ? " sel" : ""));
+  const d = cvData(), items = cvItems();
+  CV.list.setItems(items, keepScroll);
+  const info = profileInfo()[S.thread];
+  $("#cv-info").innerHTML = d
+    ? "<b>" + d.n.toLocaleString() + "</b> calls on <b>" + esc(info ? info.label : T.name) + "</b>" + (S.match ? " · " + items.length.toLocaleString() + " matching the search" : " · repeats folded") +
+      (CX.spansTruncated || CX.truncated ? " · <span class=\"t-exc\">recording was capped; later calls are only counted</span>" : "")
+    : "No calls were recorded on this thread.";
+  if (CV.focus >= 0) cvReveal(CV.focus);
+}
+
+function cvReveal(i) {
+  if (!CV.list) return;
+  let k = CV.list.items.findIndex(it => cvSpan(it) === i);
+  if (k < 0 && CV.data) {
+    // Unfold the runs and collapsed ancestors that hide it.
+    const { th } = CV.data;
+    for (let p = th.parent[i]; p >= 0; p = th.parent[p]) CV.collapsed.delete(p);
+    for (const it of CV.list.items) if (typeof it === "object" && it.run <= i && i <= CV.data.end[it.last]) CV.openRuns.add(it.run);
+    CV.list.setItems(cvItems(), true);
+    k = CV.list.items.findIndex(it => cvSpan(it) === i);
+    if (k < 0) {   // inside a run nested deeper: unfold everything on the way
+      for (const it of CV.list.items) if (typeof it === "object" && it.run <= i && i <= CV.data.end[it.last]) CV.openRuns.add(it.run);
+      CV.list.setItems(cvItems(), true);
+      k = CV.list.items.findIndex(it => cvSpan(it) === i);
+    }
+  }
+  CV.list.reveal(k);
+  CV.list.restyle();
+}
+
+function cvOpen(i, toTimeline) {
+  const { th } = CV.data, fn = th.f[i], fl = th.flags[i];
+  CV.focus = i;
+  CV.list.restyle();
+  const line = th.parent[i] >= 0 && th.line[i] > 0 ? th.line[i] : 0;
+  if (line && !(fl & FL_BOUNDARY)) select(fn, 0, { reveal: false });
+  else if (line) { select(fn, 0, { reveal: false, source: false }); openSource(th.f[th.parent[i]], line); }
+  else select(fn, 0, { reveal: false });
+  setWindow({ t0: th.t0[i], t1: th.t1[i], fn, lane: S.thread, waiting: !!(fl & FL_WAIT) });
+  if (toTimeline) {
+    const span = S.tl.span || 1, a = th.t0[i] / span, b = th.t1[i] / span, pad = Math.max((b - a) * 0.15, 1e-6);
+    revealLane(S.thread);
+    chart.jumpTo(Math.max(0, a - pad), Math.min(1, b + pad));
+  }
+}
+
+function bindCallsView() {
+  const el = $("#cv-list");
+  el.addEventListener("click", e => {
+    const it = CV.list && CV.list.itemFromEvent(e);
+    if (it === undefined) return;
+    if (typeof it === "object") { CV.openRuns.add(it.run); CV.list.setItems(cvItems(), true); return; }
+    if (e.target.closest("[data-caret]") && CV.data.end[it] > it) {
+      CV.collapsed.has(it) ? CV.collapsed.delete(it) : CV.collapsed.add(it);
+      CV.list.setItems(cvItems(), true);
+      return;
+    }
+    cvOpen(it, false);
+  });
+  el.addEventListener("dblclick", e => {
+    e.stopPropagation();   // the plot underneath resets its zoom on double-click
+    const it = CV.list && CV.list.itemFromEvent(e);
+    if (it === undefined || typeof it === "object" || e.target.closest("[data-caret]")) return;
+    cvOpen(it, true);
+  });
+  el.addEventListener("mouseover", e => { const it = CV.list && CV.list.itemFromEvent(e); setHover(it === undefined ? -1 : CV.data.th.f[cvSpan(it)]); });
+  el.addEventListener("mouseleave", () => setHover(-1));
+}
+
 function showTip(html, e) {
   tipEl.innerHTML = html; tipEl.hidden = false;
   moveTip(e);
@@ -2276,6 +2498,7 @@ function tipFor(it) {
     ];
     if (n.parent && n.parent.fn >= 0) rows.push([S.view === "inverted" ? "Of callee" : "Of parent", fmtPct(n.value, n.parent.value)]);
     rows.push(["Function overall", fmtV(T.tot[n.fn]) + " · " + fmtPct(T.tot[n.fn])]);
+    rows.push(...cxRows(n.fn));
     return fnHeader(n.fn, it.line) + grid(rows) + '<div class="t-hint">Click to select &amp; view source · Double-click to zoom</div>';
   }
   if (it.kind === "block") {
@@ -2283,8 +2506,8 @@ function tipFor(it) {
     return fnHeader(b.fn) + grid([
       ["Duration", "<b>" + fmtV(b.w * T.total) + "</b> · " + fmtPct(b.w * T.total)],
       ["Starts at", fmtAxis(b.x * T.total * (T.timed ? T.scale : 1), 0.001)],
-      ["Samples", (b.s1 - b.s0).toLocaleString()],
-    ]) + '<div class="t-hint">Click to select &amp; view source · Double-click to zoom</div>';
+      [CX ? "Segments" : "Samples", (b.s1 - b.s0).toLocaleString()],
+    ].concat(cxRows(b.fn))) + '<div class="t-hint">Click to select &amp; view source · Double-click to zoom</div>';
   }
   if (it.kind === "lane") {
     const l = it.lane;
@@ -2313,7 +2536,7 @@ function tipFor(it) {
   }
   if (it.kind === "tm") {
     const n = it.node;
-    if (n.kind === "fn") return fnHeader(n.fn) + grid([["Self", "<b>" + fmtV(n.value) + "</b> · " + fmtPct(n.value)], ["Total", fmtV(T.tot[n.fn]) + " · " + fmtPct(T.tot[n.fn])]]) +
+    if (n.kind === "fn") return fnHeader(n.fn) + grid([["Self", "<b>" + fmtV(n.value) + "</b> · " + fmtPct(n.value)], ["Total", fmtV(T.tot[n.fn]) + " · " + fmtPct(T.tot[n.fn])], ...cxRows(n.fn)]) +
       '<div class="t-hint">Click to view source · Double-click to zoom into its file</div>';
     return '<div class="t-name">' + esc(n.name) + '</div><div class="t-loc">' + esc(tmPath(n).join(" / ")) + "</div>" +
       grid([["Self time", "<b>" + fmtV(n.value) + "</b> · " + fmtPct(n.value)], ["Functions", n.count.toLocaleString()]]) + '<div class="t-hint">Click to zoom in · Esc to go back up</div>';
@@ -2377,6 +2600,7 @@ function refreshFunctions(keepScroll) {
   for (let f = 0; f < FN.length; f++) if (T.tot[f] > 0 && (!S.match || S.match[f])) ids.push(f);
   const { key, asc } = S.sort, dir = asc ? 1 : -1;
   const cmp = {
+    calls: (a, b) => ((CX ? CX.calls[a] - CX.calls[b] : 0)) || (T.tot[a] - T.tot[b]),
     self: (a, b) => (T.self[a] - T.self[b]) || (T.tot[a] - T.tot[b]),
     total: (a, b) => (T.tot[a] - T.tot[b]) || (T.self[a] - T.self[b]),
     name: (a, b) => FN[b].disp.localeCompare(FN[a].disp),
@@ -2391,6 +2615,7 @@ function refreshFunctions(keepScroll) {
 function renderFnRow(f) {
   const fo = FN[f];
   return metric(T.self[f], T.total, "#f0695a") + metric(T.tot[f], T.total, "#82a0ff") +
+    (CX ? '<div class="num cnt" title="' + (CX.calls[f] ? esc(Math.round(CX.calls[f]).toLocaleString() + " calls in all threads · avg " + fmtDur(CX.ctime[f] / CX.calls[f])) : "") + '">' + (CX.calls[f] ? fmtCount(CX.calls[f]) : "") + "</div>" : "") +
     '<div class="t-name" title="' + esc(fo.disp + (fo.rel ? "\n" + fo.rel + ":" + hotLine(f) : "")) + '"><span class="dot" style="background:' + fillFor(f) + '"></span><span class="nm">' + esc(fo.disp) + "</span></div>" +
     '<div class="loc" title="' + esc(fo.file) + '">' + (fo.rel ? esc(fo.rel) + ":" + hotLine(f) : fo.synth ? "collapsed" : "") + "</div>";
 }
@@ -2408,8 +2633,8 @@ const COL_MIN = 60, COL_FLEX_MIN = 80;
 
 function applyCols(name, widths) {
   const body = $('.tab-body[data-body="' + name + '"]'), c = COLS[name];
-  const w = widths !== undefined ? widths : store.get("cols:" + name, null);
-  if (!Array.isArray(w)) { body.style.removeProperty("--cols"); body.classList.remove("custom"); return; }
+  const w = widths !== undefined ? widths : store.get("cols:" + name, null), head = $(c.head);
+  if (!Array.isArray(w) || (head && w.length !== head.children.length)) { body.style.removeProperty("--cols"); body.classList.remove("custom"); return; }
   body.style.setProperty("--cols", w.map((x, k) => k === c.flex ? "minmax(" + COL_FLEX_MIN + "px, 1fr)" : Math.round(x) + "px").join(" "));
   body.classList.add("custom");
 }
@@ -2536,10 +2761,11 @@ function renderCalls() {
     if (e.f === -1) return '<div class="crow self">' + bar + nums + '<span class="nm">(self time in this function)</span><span></span></div>';
     if (e.f === -2) return '<div class="crow self">' + bar + nums + '<span class="nm">(thread entry point)</span><span></span></div>';
     const c = FN[e.f], ln = maxKey(e.lines) || c.line, site = maxKey(e.sites);
+    const ec = kind === "caller" ? cxEdge(e.f, fn) : cxEdge(fn, e.f), cnt = ec ? '<em class="ccount" title="exact calls, all threads">×' + fmtCount(ec[0]) + "</em>" : "";
     const chip = kind === "callee" && site ? '<button class="chip" data-site="' + site + '" title="Show where ' + esc(fo.disp) + ' calls this">from L' + site + "</button>"
       : kind === "caller" && ln ? '<span class="loc">calls at L' + ln + "</span>" : "<span></span>";
     return '<div class="crow" data-fn="' + e.f + '" data-line="' + ln + '" title="' + esc(c.disp + (c.rel ? "  " + c.rel + ":" + ln : "")) + '">' + bar + nums +
-      '<span class="nm"><span class="dot" style="background:' + fillFor(e.f) + '"></span>' + esc(c.disp) + '<span class="loc">' + esc(c.rel) + "</span></span>" + chip + "</div>";
+      '<span class="nm"><span class="dot" style="background:' + fillFor(e.f) + '"></span>' + esc(c.disp) + cnt + '<span class="loc">' + esc(c.rel) + "</span></span>" + chip + "</div>";
   };
   const list = (m, kind) => {
     const arr = Array.from(m.values()).sort((a, b) => b.w - a.w).slice(0, 200);
@@ -2548,6 +2774,7 @@ function renderCalls() {
   el.innerHTML =
     '<div class="calls-head"><span class="dot" style="background:' + fillFor(fn) + '"></span><span class="title">' + esc(fo.disp) + '</span>' +
     '<span class="loc">' + esc(fo.rel || "") + '</span><span class="grow"></span>' +
+    (CX && CX.calls[fn] ? '<span class="stat">calls <b>' + fmtCount(CX.calls[fn]) + "</b></span>" : "") +
     '<span class="stat">total <b>' + fmtV(total) + "</b> (" + fmtPct(total) + ')</span><span class="stat">self <b>' + fmtV(T.self[fn]) + "</b> (" + fmtPct(T.self[fn]) + ")</span>" +
     (fo.file && !fo.synth ? '<button class="chip" data-src="1">view source</button>' : "") + "</div>" +
     '<div class="calls-cols"><div class="calls-col"><h4>Called by</h4>' + list(callers, "caller") + "</div>" +
@@ -2684,6 +2911,8 @@ function historyGo(delta) {
   select(e.fn, e.line, { fromHistory: true });
 }
 
+const siteCount = (file, ln, f) => (CX && CX.sites.get(file)?.get(ln)?.get(f)) || 0;
+
 function lineCallChips(file, ln) {
   const m = T.lineCallees.get(file), lc = m && m.get(ln);
   if (!lc) return "";
@@ -2691,8 +2920,9 @@ function lineCallChips(file, ln) {
   let h = '<span class="ccalls">';
   for (const [f, wt] of arr.slice(0, 3)) {
     const fo = FN[f];
-    h += '<button class="cchip" data-fn="' + f + '" title="' + esc("Calls " + fo.disp + (fo.rel ? "  (" + fo.rel + ")" : "") + " · " + fmtV(wt)) + '">' +
-      '<span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + " <em>" + fmtPct(wt) + "</em></button>";
+    const sc = siteCount(file, ln, f);
+    h += '<button class="cchip" data-fn="' + f + '" title="' + esc("Calls " + fo.disp + (fo.rel ? "  (" + fo.rel + ")" : "") + " · " + fmtV(wt) + (sc ? " · " + sc.toLocaleString() + " calls from this line" : "")) + '">' +
+      '<span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + " <em>" + fmtPct(wt) + (sc ? " ×" + fmtCount(sc) : "") + "</em></button>";
   }
   if (arr.length > 3) h += '<button class="cchip more" data-more="' + ln + '">+' + (arr.length - 3) + "</button>";
   return h + "</span>";
@@ -2706,7 +2936,8 @@ function showCallMenu(btn, ln) {
   menu.className = "call-menu"; menu.id = "call-menu";
   menu.innerHTML = '<div class="call-menu-head">Line ' + ln + " calls</div>" + Array.from(lc).sort((a, b) => b[1] - a[1]).slice(0, 80).map(([f, wt]) => {
     const fo = FN[f];
-    return '<div class="crow" data-fn="' + f + '"><span class="pct">' + fmtPct(wt) + '</span><span class="time">' + fmtV(wt) + '</span><span class="nm"><span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + '<span class="loc">' + esc(fo.rel) + "</span></span><span></span></div>";
+    const sc = siteCount(SRC.file, ln, f);
+    return '<div class="crow" data-fn="' + f + '"><span class="pct">' + fmtPct(wt) + '</span><span class="time">' + fmtV(wt) + '</span><span class="nm"><span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + (sc ? '<em class="ccount">×' + fmtCount(sc) + "</em>" : "") + '<span class="loc">' + esc(fo.rel) + "</span></span><span></span></div>";
   }).join("");
   document.body.appendChild(menu);
   const r = btn.getBoundingClientRect(), mr = menu.getBoundingClientRect();
@@ -2726,6 +2957,7 @@ async function openSource(fn, line, opts = {}) {
   $("#src-fn").textContent = fo.disp;
   $("#src-path").textContent = fo.file ? "\u200e" + (fo.rel || fo.file) + (line ? ":" + line : "") + "\u200e" : "";
   $("#src-path").title = fo.file;
+  renderSig(fn);
   const tok = ++SRC.tok;
   if (!fo.file || fo.synth || fo.file.startsWith("<")) {
     SRC.file = null;
@@ -2751,6 +2983,17 @@ async function openSource(fn, line, opts = {}) {
     renderSource(fo.file, data);
   }
   setSourceTarget(line);
+}
+
+// Exact signatures (argument and return types seen) and exceptions, from trace mode.
+function renderSig(fn) {
+  const el = $("#src-sig"), sg = CX && CX.sigs.get(fn), ex = CX && CX.excs.get(fn), c = CX ? CX.calls[fn] : 0;
+  if (!c) { el.hidden = true; el.innerHTML = ""; return; }
+  const name = FN[fn].disp.split(".").pop();
+  let h = '<div class="sig-head"><b>' + fmtCount(c) + "</b> call" + (c === 1 ? "" : "s") + (c > 1 ? " · avg " + fmtDur(CX.ctime[fn] / c) : "") + "</div>";
+  for (const s of (sg || []).slice(0, 4)) h += '<div class="sig" title="' + esc(name + cxSig(s)) + '"><code>' + esc(name + cxSig(s)) + "</code><em>×" + fmtCount(s.n) + "</em></div>";
+  if (ex && ex.length) h += '<div class="sig exc">raises ' + ex.map(([e, k]) => "<code>" + esc(e) + "</code> ×" + fmtCount(k)).join(", ") + "</div>";
+  el.innerHTML = h; el.hidden = false;
 }
 
 function renderSource(file, data) {
@@ -2804,7 +3047,7 @@ function modelForView() {
     case "timeline": return S.tl ? lanesModel() : timelineModel();
     case "tasks": return tasksModel();
     case "map": return treemapModel();
-    case "graph": case "threads": return null;
+    case "graph": case "threads": case "calls": return null;
     default: return flameModel(false);
   }
 }
@@ -2879,6 +3122,7 @@ function restorePlace(p) {
 }
 
 function setView(v, keep) {
+  if (v === "calls" && !CX) return;
   if (v !== S.view) navMark();
   const prev = S.view;
   S.view = v; store.set("view", v);
@@ -2889,6 +3133,7 @@ function setView(v, keep) {
   chart.setModel(modelForView(), keep !== undefined ? keep : (timeLike(prev) && timeLike(v)));
   renderGraph();
   renderThreads();
+  renderCallsView(prev === "calls");
   updateChartInfo();
   if ((prev === "inverted") !== (v === "inverted")) refreshTree(true);
 }
@@ -2903,14 +3148,19 @@ function updateChartInfo() {
     $("#plot-empty").hidden = true;
     return;
   }
-  if (S.view === "timeline" && S.tl) {
-    const info = profileInfo();
-    $("#chart-info").innerHTML = (PROCS.size > 1 ? "<b>" + PROCS.size + "</b> processes · " : "") + "<b>" + info.length + "</b> threads · " + fmtDur(S.tl.span) +
-      " wall clock · hatched = waiting · click a call to see what other threads did meanwhile · drag across the time axis to pick a window";
+  if (S.view === "calls") {
+    $("#chart-info").innerHTML = "every call in order · click: source + what other threads did meanwhile · double-click: show on the timeline · search (/) filters";
     $("#plot-empty").hidden = true;
     return;
   }
-  const parts = ["<b>" + esc(T.name) + "</b>", fmtV(T.total), T.n.toLocaleString() + " samples"];
+  if (S.view === "timeline" && S.tl) {
+    const info = profileInfo();
+    $("#chart-info").innerHTML = (PROCS.size > 1 ? "<b>" + PROCS.size + "</b> processes · " : "") + "<b>" + info.length + "</b> threads · " + fmtDur(S.tl.span) +
+      " wall clock" + (CX ? " · exact trace" + (CX.truncated ? " (event cap reached: later calls only counted)" : "") : "") + " · hatched = waiting · click a call to see what other threads did meanwhile · drag across the time axis to pick a window";
+    $("#plot-empty").hidden = true;
+    return;
+  }
+  const parts = ["<b>" + esc(T.name) + "</b>", fmtV(T.total), CX ? "exact trace" : T.n.toLocaleString() + " samples"];
   if (S.view === "timeline" || S.view === "tasks") {
     if (T.timed) parts.push("x-axis: sampled time (idle gaps removed)");
     if (S.view === "tasks") parts.push(getTasks().lanes.length + " lanes");
@@ -2997,6 +3247,7 @@ function rebuildAll(resetSel, keepView) {
   chart.setModel(modelForView(), !!keepView);
   renderGraph();
   renderThreads();
+  renderCallsView(false);
   updateChartInfo();
   refreshFunctions(false);
   refreshTree(true);
@@ -3094,10 +3345,10 @@ function bindUI() {
   const search = $("#search");
   search.addEventListener("input", () => {
     clearTimeout(st);
-    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); }, 90);
+    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); renderCallsView(false); }, 90);
   });
   search.addEventListener("keydown", e => {
-    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); search.blur(); e.stopPropagation(); }
+    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); renderCallsView(false); search.blur(); e.stopPropagation(); }
     if (e.key === "Enter") { const f = fnList.items[0]; if (f !== undefined) select(f, 0); }
   });
 
@@ -3210,6 +3461,7 @@ function bindUI() {
   bindGraph();
   bindThreads();
   bindDuring();
+  bindCallsView();
   bindColResize();
   $("#btn-help").addEventListener("click", () => { $("#help").hidden = false; });
   $("#help").addEventListener("click", e => { if (e.target.id === "help" || e.target.closest("[data-close]")) $("#help").hidden = true; });
@@ -3305,6 +3557,21 @@ async function boot() {
   document.title = "codexplore · " + target;
 
   buildFunctions();
+  if (S.raw.codexplore?.mode === "trace") {
+    try {
+      const cr = await fetch("/api/calls");
+      if (cr.ok) buildCalls(await cr.json());
+    } catch (err) { console.warn("calls.json unavailable", err); }
+  }
+  $("#view-calls").hidden = !CX;
+  if (S.view === "calls" && !CX) S.view = "flame";
+  if (CX) {
+    const head = $("#fn-head"), cell = document.createElement("div");
+    cell.className = "num sortable"; cell.dataset.sort = "calls"; cell.textContent = "Calls"; cell.title = "Exact number of calls (all threads)";
+    head.insertBefore(cell, head.children[2]);
+    head.classList.add("traced");
+    COLS.functions.flex = 3;
+  }
   if (S.raw.codexplore?.timeline) {
     let span = +S.raw.codexplore.span || 0;
     if (!span) for (const p of S.raw.profiles || []) span = Math.max(span, +p.endValue || 0);
@@ -3317,7 +3584,7 @@ async function boot() {
   $("#loading").hidden = true;
 
   chart = new Chart();
-  fnList = new VList($("#fn-list"), 24, renderFnRow, f => "fn-cols" + (f === S.selFn ? " sel" : f === S.hoverFn ? " hov" : ""));
+  fnList = new VList($("#fn-list"), 24, renderFnRow, f => "fn-cols" + (CX ? " traced" : "") + (f === S.selFn ? " sel" : f === S.hoverFn ? " hov" : ""));
   treeList = new VList($("#tree-list"), 24, renderTreeRow, it => "tree-cols" + (it && it.n.fn === S.selFn ? " sel" : ""));
   initThreads();
   bindUI();
