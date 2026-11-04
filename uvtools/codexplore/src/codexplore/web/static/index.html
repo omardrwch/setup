@@ -48,6 +48,10 @@
     <section class="left" id="left">
       <div class="chart-panel">
         <div class="toolbar">
+          <div class="nav">
+            <button class="icon-btn small" id="nav-back" title="Back: previous view, thread, zoom or selection (Alt+←)" disabled>←</button>
+            <button class="icon-btn small" id="nav-fwd" title="Forward (Alt+→)" disabled>→</button>
+          </div>
           <div class="seg" id="views">
             <button data-view="flame" title="Merged call tree, callers on top (1)">Flame graph</button>
             <button data-view="inverted" title="Inverted tree: where time is actually spent (2)">Bottom-up</button>
@@ -163,9 +167,11 @@
       <div><kbd>Click a call</kbd><span>Timeline (all threads): show what every other thread did meanwhile</span></div>
       <div><kbd>Drag time axis</kbd><span>Timeline (all threads): pick a time window to compare threads</span></div>
       <div><kbd>Click a name</kbd><span>Timeline (all threads): expand / collapse a thread or process</span></div>
+      <div><kbd>Drag column edge</kbd><span>Resize table columns or the timeline's name gutter (double-click the edge to reset)</span></div>
       <div><kbd>1</kbd> … <kbd>7</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph · Threads</span></div>
       <div><kbd>→ chips</kbd><span>In the source panel, click what a line calls to jump into it</span></div>
-      <div><kbd>Alt + ←</kbd> <kbd>Alt + →</kbd><span>Back / forward through visited code</span></div>
+      <div><kbd>Alt + ←</kbd> <kbd>Alt + →</kbd><span>Back / forward: view, thread, zoom, selection and time window (also the ← → buttons in the toolbar, or mouse back / forward)</span></div>
+      <div><kbd>← → in source panel</kbd><span>Back / forward through visited code only</span></div>
       <div><kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd><span>Zoom in · out · reset</span></div>
       <div><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd><span>Pan and scroll</span></div>
       <div><kbd>/</kbd><span>Search</span></div>

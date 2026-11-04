@@ -86,7 +86,7 @@ Opens an interactive web UI at `http://127.0.0.1:8125` with:
 - **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted; each line shows chips for the functions it calls, so you can follow the code by clicking, with back/forward history
 - **Frame filters** — hide import machinery, collapse library frames into one block, or show only your code
 
-Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`7` switch views, Alt + ←/→ go back/forward in the source viewer. Press `?` in the UI for all shortcuts.
+Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`7` switch views. The toolbar's ← → buttons (or Alt + ←/→, or the mouse back/forward buttons) step back and forward through where you've been: view, thread, zoom, selection, Map drill-down and time window; the source panel's own ← → step through visited code only. Drag a column edge in the tables, or the edge of the timeline's name gutter, to resize it (double-click to reset). Press `?` in the UI for all shortcuts.
 
 **Options:**
 - `--port N` — Port for the web server (default: 8125)

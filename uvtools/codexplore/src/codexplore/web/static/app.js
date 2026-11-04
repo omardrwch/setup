@@ -117,6 +117,7 @@ const S = {
   sort: { key: "self", asc: false },
   phaseLevel: clamp(+store.get("phaseLevel", 1) || 1, 1, 8),
   waiting: store.get("waiting", "hide") === "show" ? "show" : "hide",
+  gutter: clamp(+store.get("gutter", GUTTER) || GUTTER, 120, 900),
   tl: null,   // wall-clock timeline data, for runs recorded with timestamps
 };
 const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph", "threads"];
@@ -531,6 +532,7 @@ class Chart {
   }
 
   get left() { return this.model ? this.model.gutter : 0; }
+  onGutterEdge(px) { return !!(this.model && this.model.gutter) && Math.abs(px - this.left) <= 4; }
   get top() { return this.model ? this.model.top : 0; }
   get pw() { return Math.max(1, this.W - this.left); }
   get ph() { return Math.max(1, this.H - this.top); }
@@ -597,17 +599,21 @@ class Chart {
   animateTo(a, b) {
     this.cancelAnim();
     const id = this.animId, fa = this.x0, fb = this.x1, t0 = performance.now(), D = 260;
+    this.target = [a, b];
     const step = now => {
       if (id !== this.animId) return;
       const t = Math.min(1, (now - t0) / D), e = 1 - Math.pow(1 - t, 3);
       this.setRange(fa + (a - fa) * e, fb + (b - fb) * e);
-      if (t < 1) requestAnimationFrame(step);
+      if (t < 1) requestAnimationFrame(step); else this.target = null;
     };
     requestAnimationFrame(step);
   }
-  cancelAnim() { this.animId++; }
+  cancelAnim() { this.animId++; this.target = null; }
+  // Zoom that counts as a navigation step (Back returns to the previous range).
+  jumpTo(a, b) { navMark(); this.animateTo(a, b); }
 
   zoomToItem(it) {
+    navMark();
     const pad = it.w * 0.03;
     this.animateTo(it.x - pad, it.x + it.w + pad);
     if (it.y != null) {
@@ -768,12 +774,19 @@ class Chart {
       if (e.button !== 0 || !this.model) return;
       if (e.target.closest(".hbar,.vbar")) return;
       p.setPointerCapture(e.pointerId);
-      const py = e.clientY - p.getBoundingClientRect().top;
+      const r = p.getBoundingClientRect(), py = e.clientY - r.top;
+      if (this.onGutterEdge(e.clientX - r.left)) { down = { gutter: true, x: e.clientX, g0: S.gutter }; return; }
       down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, drag: false, brush: !!this.model.onBrush && py < AXIS };
     });
     p.addEventListener("pointermove", e => {
       if (!this.model) return;
       this.mouse = { clientX: e.clientX, clientY: e.clientY };
+      if (down && down.gutter) {
+        S.gutter = clamp(down.g0 + e.clientX - down.x, 120, Math.max(120, this.W * 0.6));
+        hideTip(); this.request();
+        return;
+      }
+      if (!down) p.classList.toggle("gutter-edge", this.onGutterEdge(e.clientX - p.getBoundingClientRect().left));
       if (down && down.brush) {
         const r = p.getBoundingClientRect();
         if (Math.abs(e.clientX - down.x) > 3) {
@@ -799,6 +812,7 @@ class Chart {
     });
     const end = e => {
       if (!down) return;
+      if (down.gutter) { store.set("gutter", S.gutter); down = null; return; }
       const wasDrag = down.drag;
       if (down.brush && this.selDrag) {
         const [a, b] = this.selDrag;
@@ -814,9 +828,10 @@ class Chart {
     p.addEventListener("pointerleave", e => { if (!down && this.model) { this.mouse = null; this.hover(null, e); if (this.model.cursor) this.request(); } });
     p.addEventListener("dblclick", e => {
       if (!this.model || e.target.closest(".hbar,.vbar")) return;
+      if (this.onGutterEdge(e.clientX - p.getBoundingClientRect().left)) { S.gutter = GUTTER; store.set("gutter", GUTTER); this.request(); return; }
       const it = this.hitAt(e);
       if (this.model.static) { if (this.model.dblclick) this.model.dblclick(it); return; }
-      if (it && it.w > 0) this.zoomToItem(it); else this.animateTo(0, 1);
+      if (it && it.w > 0) this.zoomToItem(it); else this.jumpTo(0, 1);
     });
   }
 
@@ -888,8 +903,8 @@ class Chart {
       if (!st) return;
       const { x } = xOf(e), s = st; st = null; this.brush = null;
       if (s.mode === "brush") {
-        if (s.moved) { const a = Math.min(s.x0, x), b = Math.max(s.x0, x); if (b > a) this.animateTo(a, b); }
-        else { const sp = this.span; this.animateTo(x - sp / 2, x + sp / 2); }
+        if (s.moved) { const a = Math.min(s.x0, x), b = Math.max(s.x0, x); if (b > a) this.jumpTo(a, b); }
+        else { const sp = this.span; this.jumpTo(x - sp / 2, x + sp / 2); }
       }
       this.request();
     };
@@ -903,7 +918,7 @@ class Chart {
       const px = this.left + (x - this.x0) / this.span * this.pw;
       this.cancelAnim(); this.zoomAt(Math.exp(clamp(e.deltaY, -60, 60) * 0.006), px);
     }, { passive: false });
-    m.addEventListener("dblclick", () => this.animateTo(0, 1));
+    m.addEventListener("dblclick", () => this.jumpTo(0, 1));
   }
 }
 
@@ -993,7 +1008,7 @@ function timelineModel() {
 function tasksModel() {
   const tk = getTasks(), lanes = tk.lanes, tl = getTimeline();
   return {
-    kind: "tasks", gutter: GUTTER, top: AXIS + BAND, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
+    kind: "tasks", get gutter() { return S.gutter; }, top: AXIS + BAND, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
     hitHeader: phaseBandHit,
     height: () => lanes.length * LANE + 6,
     drawMini: (ctx, left, pw, H) => drawMiniRows(tl.rows, ctx, left, pw, H),
@@ -1172,7 +1187,7 @@ function lanesModel() {
   const span = S.tl.span || 1;
   const lay = () => laneLayout();
   return {
-    kind: "lanes", gutter: GUTTER, top: AXIS + BAND, minSpan: Math.max(1e-7, 2e-5 / span), axisSpan: span, cursor: true,
+    kind: "lanes", get gutter() { return S.gutter; }, top: AXIS + BAND, minSpan: Math.max(1e-7, 2e-5 / span), axisSpan: span, cursor: true,
     hitHeader: (px, py, v) => phaseBandHit(px, py, v, phaseWall),
     onBrush(a, b) { if ((b - a) * span > 1e-4) setWindow({ t0: a * span, t1: b * span, fn: -1, lane: -1 }); },
     height: () => lay().height + 6,
@@ -1426,6 +1441,7 @@ function laneClick(it) {
 }
 
 function setWindow(win) {
+  navMark();
   LN.win = win;
   renderDuring();
   if (win && S.tab !== "calls" && S.tab !== "tree") setTab("during");
@@ -1488,7 +1504,7 @@ function renderDuring() {
   if (allFns.size) h += '<div class="during-all"><span class="lbl">Busiest elsewhere</span>' + chips(allFns, -1, 6) + "</div>";
   const busyRows = others.filter(r => r.busy > 0).sort((a, b) => b.busy - a.busy), waitingOnly = others.filter(r => r.busy <= 0);
   h += '<div class="drow dhead"><span>Thread</span><span>Running</span><span class="num">Waiting</span><span>Doing</span></div>';
-  const row = r => '<div class="drow" data-i="' + r.pi.i + '"><span class="nm">' + esc(r.pi.label) + (multi ? '<span class="loc">' + esc(PROCS.get(r.pi.pid).short) + " · " + r.pi.pid + "</span>" : "") + "</span>" +
+  const row = r => '<div class="drow" data-i="' + r.pi.i + '"><span class="nm" title="' + esc(r.pi.label + (multi ? "\n" + (PROCS.get(r.pi.pid).cmd || PROCS.get(r.pi.pid).short) + " · pid " + r.pi.pid : "")) + '">' + esc(r.pi.label) + (multi ? '<span class="loc">' + esc(PROCS.get(r.pi.pid).short) + " · " + r.pi.pid + "</span>" : "") + "</span>" +
     '<span class="dbar"><i style="width:' + Math.min(100, r.busy / dur * 100).toFixed(1) + '%"></i><b>' + fmtDur(r.busy) + "</b> " + fmtPct(r.busy, dur) + "</span>" +
     '<span class="num loc">' + (r.wait > 0 ? fmtDur(r.wait) : "") + "</span>" +
     '<span class="dchips">' + chips(r.fns, r.pi.i, 3) + "</span></div>";
@@ -1505,6 +1521,7 @@ function renderDuring() {
   if (waitingOnly.length) h += '<div class="during-idle">' + waitingOnly.length + " other thread" + (waitingOnly.length === 1 ? " was" : "s were") + " only waiting: " +
     waitingOnly.slice(0, 12).map(r => esc(r.pi.label) + (multi ? ' <span class="loc">(' + esc(PROCS.get(r.pi.pid).short) + ")</span>" : "")).join(", ") + (waitingOnly.length > 12 ? ", …" : "") + "</div>";
   el.innerHTML = h;
+  colHandles("during");
   if (S.tab === "during") $("#tab-info").textContent = busyRows.length + " threads running in this window · click one to open it";
 }
 
@@ -1517,7 +1534,7 @@ function bindDuring() {
       else if (LN.win) {
         if (S.view !== "timeline") setView("timeline");
         const a = LN.win.t0 / span(), b = LN.win.t1 / span(), pad = (b - a) * 0.05;
-        chart.animateTo(a - pad, b + pad);
+        chart.jumpTo(a - pad, b + pad);
       }
       return;
     }
@@ -1655,13 +1672,14 @@ function renderPhases() {
       '<span class="gantt"><i style="left:' + (px * 100).toFixed(3) + "%;width:max(2px," + (pw * 100).toFixed(3) + "%);background:" + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></i></span></div>';
   });
   el.innerHTML = h;
+  colHandles("phases");
   if (S.tab === "phases") $("#tab-info").textContent = "click a phase to zoom the timeline";
 }
 
 function focusPhase(p) {
   if (S.view !== "timeline" && S.view !== "tasks") setView("timeline", false);
   const [x, w] = S.view === "timeline" && S.tl ? phaseWall(p) : [p.x, p.w], pad = w * 0.02;
-  chart.animateTo(x - pad, x + w + pad);
+  chart.jumpTo(x - pad, x + w + pad);
   if (p.fn >= 0) select(p.fn, 0, { reveal: false });
 }
 
@@ -1756,6 +1774,7 @@ function tmPath(n) {
 }
 
 function setTreemapFocus(n) {
+  if (n && n !== TM.focus && n.kind !== "fn") navMark();
   TM.focus = n && n.kind !== "fn" ? n : TM.focus;
   TM.key = "";
   chart.request();
@@ -2167,6 +2186,7 @@ function highlightThreads(ids) {
 
 function switchThread(i, keepView) {
   if (i == null || i === S.thread) return;
+  navMark();
   S.thread = i;
   LN.layout = null;
   syncPickers();
@@ -2375,6 +2395,71 @@ function renderFnRow(f) {
     '<div class="loc" title="' + esc(fo.file) + '">' + (fo.rel ? esc(fo.rel) + ":" + hotLine(f) : fo.synth ? "collapsed" : "") + "</div>";
 }
 
+/* ─── Resizable table columns ─── */
+
+// Each table keeps one flexible column that absorbs the slack; dragged columns get pixel widths.
+const COLS = {
+  functions: { head: "#fn-head", flex: 2 },
+  tree: { head: '.tab-body[data-body="tree"] .grid-head', flex: 0 },
+  phases: { head: "#phases .prow.phead", flex: 1 },
+  during: { head: "#during .drow.dhead", flex: 3 },
+};
+const COL_MIN = 60, COL_FLEX_MIN = 80;
+
+function applyCols(name, widths) {
+  const body = $('.tab-body[data-body="' + name + '"]'), c = COLS[name];
+  const w = widths !== undefined ? widths : store.get("cols:" + name, null);
+  if (!Array.isArray(w)) { body.style.removeProperty("--cols"); body.classList.remove("custom"); return; }
+  body.style.setProperty("--cols", w.map((x, k) => k === c.flex ? "minmax(" + COL_FLEX_MIN + "px, 1fr)" : Math.round(x) + "px").join(" "));
+  body.classList.add("custom");
+}
+
+function colHandles(name) {
+  const head = $(COLS[name].head);
+  if (!head) return;
+  Array.from(head.children).slice(0, -1).forEach((cell, k) => {
+    if (cell.querySelector(":scope > .col-rs")) return;
+    const h = document.createElement("i");
+    h.className = "col-rs"; h.dataset.table = name; h.dataset.k = k;
+    h.title = "Drag to resize · double-click to reset all columns";
+    cell.appendChild(h);
+  });
+}
+
+function bindColResize() {
+  document.addEventListener("pointerdown", e => {
+    const h = e.target.closest && e.target.closest(".col-rs");
+    if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    const name = h.dataset.table, k = +h.dataset.k, c = COLS[name], head = $(c.head);
+    const w0 = Array.from(head.children).map(el => el.getBoundingClientRect().width);
+    // Left of the flexible column a handle resizes its own column; right of it, the next one.
+    const j = k < c.flex ? k : k + 1, sign = k < c.flex ? 1 : -1, room = Math.max(0, w0[c.flex] - COL_FLEX_MIN), x0 = e.clientX;
+    let w = w0;
+    h.setPointerCapture(e.pointerId);
+    document.body.classList.add("col-resizing");
+    const move = ev => {
+      w = w0.slice();
+      w[j] = clamp(w0[j] + sign * (ev.clientX - x0), COL_MIN, w0[j] + room);
+      applyCols(name, w);
+    };
+    const up = () => {
+      h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up);
+      document.body.classList.remove("col-resizing");
+      if (w !== w0) store.set("cols:" + name, w);
+    };
+    h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); h.addEventListener("pointercancel", up);
+  }, true);
+  const swallow = e => { if (e.target.closest && e.target.closest(".col-rs")) { e.stopPropagation(); e.preventDefault(); return true; } return false; };
+  document.addEventListener("click", swallow, true);
+  document.addEventListener("dblclick", e => {
+    if (!swallow(e)) return;
+    const name = e.target.closest(".col-rs").dataset.table;
+    store.set("cols:" + name, null); applyCols(name, null);
+  }, true);
+  for (const name of Object.keys(COLS)) { applyCols(name); colHandles(name); }
+}
+
 /* ═══════════════════════════ Call tree ═══════════════════════════ */
 
 const TV = { expanded: new Set(), inv: null, root: null };
@@ -2396,7 +2481,7 @@ function refreshTree(reset) {
 
 function renderTreeRow(it) {
   const n = it.n, fo = FN[n.fn], open = TV.expanded.has(n), d = it.d;
-  return '<div class="t-name" style="padding-left:min(' + (d * 10) + 'px, 45%)">' +
+  return '<div class="t-name" style="padding-left:min(' + (d * 10) + 'px, 45%)" title="' + esc(fo.disp + (fo.rel ? "\n" + fo.rel + ":" + (maxKey(n.lines) || fo.line) : "")) + '">' +
     (d >= 12 ? '<span class="depth-badge" title="Call depth">' + d + "</span>" : "") +
     '<span class="caret" data-caret="1">' + (n.kids.length ? (open ? "▾" : "▸") : "") + "</span>" +
     '<span class="dot" style="background:' + fillFor(n.fn) + '"></span><span class="nm">' + esc(fo.disp) + "</span>" +
@@ -2724,7 +2809,77 @@ function modelForView() {
   }
 }
 
+/* ─── Back / forward: views, threads, zoom, selection, Map drill-down and time windows ─── */
+
+const NAV = { back: [], fwd: [], ready: false, restoring: false, batched: false };
+
+function navPlace() {
+  const [x0, x1] = chart.target || [chart.x0, chart.x1], h = SRC.hist[SRC.pos];
+  return {
+    view: S.view, thread: S.thread, tab: S.tab, x0, x1, sy: chart.sy, fn: S.selFn,
+    line: h && h.fn === S.selFn ? h.line : 0, win: LN.win, tm: TM.focus ? tmPath(TM.focus) : [],
+  };
+}
+
+function samePlace(a, b) {
+  return a.view === b.view && a.thread === b.thread && a.fn === b.fn && a.win === b.win && a.tab === b.tab &&
+    Math.abs(a.x0 - b.x0) < 1e-9 && Math.abs(a.x1 - b.x1) < 1e-9 && Math.abs(a.sy - b.sy) < 1 && a.tm.join("/") === b.tm.join("/");
+}
+
+// Call before a navigation step; steps triggered by one user action collapse into one entry.
+function navMark() {
+  if (!NAV.ready || NAV.restoring || NAV.batched) return;
+  NAV.batched = true;
+  queueMicrotask(() => { NAV.batched = false; });
+  const p = navPlace(), top = NAV.back[NAV.back.length - 1];
+  if (top && samePlace(top, p)) return;
+  NAV.back.push(p);
+  if (NAV.back.length > 200) NAV.back.shift();
+  NAV.fwd.length = 0;
+  updateNavButtons();
+}
+
+function updateNavButtons() {
+  const b = $("#nav-back"), f = $("#nav-fwd");
+  b.disabled = !NAV.back.length; f.disabled = !NAV.fwd.length;
+}
+
+function navGo(delta) {
+  const from = delta < 0 ? NAV.back : NAV.fwd, to = delta < 0 ? NAV.fwd : NAV.back;
+  if (!from.length) return;
+  const cur = navPlace();
+  let p = from.pop();
+  while (p && samePlace(p, cur) && from.length) p = from.pop();
+  if (!p || samePlace(p, cur)) { updateNavButtons(); return; }
+  to.push(cur);
+  NAV.restoring = true;
+  try { restorePlace(p); } finally { NAV.restoring = false; }
+  updateNavButtons();
+}
+
+function restorePlace(p) {
+  hideTip();
+  if (p.thread !== S.thread && PROFILES[p.thread]) { S.thread = p.thread; LN.layout = null; syncPickers(); rebuildAll(true, true); }
+  if (p.view !== S.view) setView(p.view, true);
+  if (p.tm.length || TM.focus) {
+    let n = getTreemap();
+    for (const name of p.tm) { const c = n.kids.find(k => k.name === name); if (!c) break; n = c; }
+    setTreemapFocus(n);
+  }
+  LN.win = p.win;
+  renderDuring();
+  if (p.tab !== S.tab) setTab(p.tab);
+  if (p.fn !== S.selFn) select(p.fn, p.line, { reveal: false, fromHistory: true });
+  if (!STATIC_VIEWS.has(S.view) && S.view !== "map") {
+    chart.cancelAnim();
+    chart.sy = clamp(p.sy, 0, chart.maxSy());
+    chart.animateTo(p.x0, p.x1);
+  }
+  chart.request();
+}
+
 function setView(v, keep) {
+  if (v !== S.view) navMark();
   const prev = S.view;
   S.view = v; store.set("view", v);
   $$("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
@@ -2793,6 +2948,7 @@ function setHover(fn) {
 }
 
 function select(fn, line, opts = {}) {
+  if (!opts.fromHistory && (fn ?? -1) !== S.selFn) navMark();
   if (fn == null || fn < 0 || !FN[fn]) {
     S.selFn = -1;
   } else {
@@ -2920,7 +3076,7 @@ function bindUI() {
   $$("#views button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
   $$(".zoom button").forEach(b => b.addEventListener("click", () => {
     const z = b.dataset.zoom;
-    if (z === "in") chart.zoomCenter(0.5); else if (z === "out") chart.zoomCenter(2); else chart.animateTo(0, 1);
+    if (z === "in") chart.zoomCenter(0.5); else if (z === "out") chart.zoomCenter(2); else chart.jumpTo(0, 1);
   }));
 
   const frames = $("#frames"), color = $("#color"), waiting = $("#waiting");
@@ -3010,6 +3166,8 @@ function bindUI() {
   $("#src-close").addEventListener("click", () => setSourcePanel(false));
   $("#src-back").addEventListener("click", () => historyGo(-1));
   $("#src-fwd").addEventListener("click", () => historyGo(1));
+  $("#nav-back").addEventListener("click", () => navGo(-1));
+  $("#nav-fwd").addEventListener("click", () => navGo(1));
   updateHistoryButtons();
   $("#src-body").addEventListener("click", e => {
     const chip = e.target.closest(".cchip");
@@ -3028,7 +3186,7 @@ function bindUI() {
     else if (!e.target.closest("#call-menu")) closeCallMenu();
   });
   document.addEventListener("mouseup", e => {
-    if (e.button === 3 || e.button === 4) { e.preventDefault(); historyGo(e.button === 3 ? -1 : 1); }
+    if (e.button === 3 || e.button === 4) { e.preventDefault(); navGo(e.button === 3 ? -1 : 1); }
   });
 
   // Phases
@@ -3052,6 +3210,7 @@ function bindUI() {
   bindGraph();
   bindThreads();
   bindDuring();
+  bindColResize();
   $("#btn-help").addEventListener("click", () => { $("#help").hidden = false; });
   $("#help").addEventListener("click", e => { if (e.target.id === "help" || e.target.closest("[data-close]")) $("#help").hidden = true; });
 
@@ -3103,11 +3262,11 @@ function bindKeys() {
       if (sourceOpen()) { setSourcePanel(false); return; }
       if (S.view === "map" && TM.focus && TM.focus.parent) { setTreemapFocus(TM.focus.parent); return; }
       if (LN.win) { setWindow(null); return; }
-      if (chart.span < 0.9999) { chart.animateTo(0, 1); return; }
+      if (chart.span < 0.9999) { chart.jumpTo(0, 1); return; }
       if (S.selFn >= 0) select(-1);
       return;
     }
-    if (e.altKey && !inInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { e.preventDefault(); historyGo(e.key === "ArrowLeft" ? -1 : 1); return; }
+    if (e.altKey && !inInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { e.preventDefault(); navGo(e.key === "ArrowLeft" ? -1 : 1); return; }
     if (inInput || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     if (k === "/") { e.preventDefault(); $("#search").focus(); $("#search").select(); return; }
@@ -3118,7 +3277,7 @@ function bindKeys() {
     if (STATIC_VIEWS.has(S.view)) return;
     if (k === "+" || k === "=") { chart.zoomCenter(0.5); return; }
     if (k === "-" || k === "_") { chart.zoomCenter(2); return; }
-    if (k === "0") { chart.animateTo(0, 1); return; }
+    if (k === "0") { chart.jumpTo(0, 1); return; }
     if (k === "ArrowLeft" || k === "ArrowRight") { e.preventDefault(); chart.cancelAnim(); chart.panPx((k === "ArrowLeft" ? -1 : 1) * chart.pw * 0.15); return; }
     if (k === "ArrowUp" || k === "ArrowDown") { e.preventDefault(); chart.scrollBy((k === "ArrowUp" ? -1 : 1) * ROW * 3); return; }
   });
@@ -3168,6 +3327,8 @@ async function boot() {
   refreshFunctions(false);
   refreshTree(true);
   renderCalls();
+  NAV.ready = true;
+  updateNavButtons();
   if (store.get("sourceOpen", false)) {
     setSourcePanel(true);
     $("#src-body").innerHTML = '<div class="src-msg">Click a function in the graph or tables to see its source with per-line timing.</div>';
