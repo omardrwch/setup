@@ -81,11 +81,9 @@ def serve_analysis(
         """Return run metadata."""
         return JSONResponse(meta)
 
-    async def api_profile(request: Request) -> JSONResponse:
-        """Return the speedscope profile data."""
-        with open(profile_file) as f:
-            data = json.load(f)
-        return JSONResponse(data)
+    async def api_profile(request: Request) -> Response:
+        """Return the profile data (speedscope layout, possibly with timeline extensions)."""
+        return Response(profile_file.read_bytes(), media_type="application/json")
 
     async def api_source(request: Request) -> JSONResponse:
         """Return source code for a given file path.

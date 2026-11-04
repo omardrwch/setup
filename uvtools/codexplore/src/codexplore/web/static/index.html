@@ -13,6 +13,7 @@
   <header class="top">
     <div class="brand"><span class="logo">cx</span>codexplore</div>
     <div class="target" id="target"></div>
+    <label class="field" id="process-field" hidden><span>Process</span><select id="process"></select></label>
     <label class="field"><span>Thread</span><select id="thread"></select></label>
     <label class="field"><span>Frames</span>
       <select id="frames">
@@ -26,6 +27,12 @@
       <select id="color">
         <option value="module">By module</option>
         <option value="heat">By self time</option>
+      </select>
+    </label>
+    <label class="field" id="wait-field" hidden title="Time spent blocked (sleep, locks, queues, futures, I/O). Detected from the call that was running."><span>Waiting</span>
+      <select id="waiting">
+        <option value="hide">Hide from totals</option>
+        <option value="show">Count as time</option>
       </select>
     </label>
     <div class="search">
@@ -48,6 +55,7 @@
             <button data-view="tasks" title="Samples grouped by async task / active function (4)">Tasks</button>
             <button data-view="map" title="Treemap of time by package, file and function (5)">Map</button>
             <button data-view="graph" title="Callers and callees around the selected function (6)">Graph</button>
+            <button data-view="threads" title="All processes and threads: entry points and where each spends time (7)">Threads</button>
           </div>
           <div class="chart-info" id="chart-info"></div>
           <div class="grow"></div>
@@ -63,6 +71,7 @@
         <div class="plot" id="plot">
           <canvas></canvas>
           <svg class="graph" id="graph" hidden></svg>
+          <div class="threads-wrap" id="threads-wrap" hidden><svg class="graph threads" id="threads"></svg></div>
           <div class="hbar" hidden><div class="thumb"></div></div>
           <div class="vbar" hidden><div class="thumb"></div></div>
           <div class="empty" id="plot-empty" hidden></div>
@@ -77,6 +86,7 @@
           <button data-tab="tree">Call tree</button>
           <button data-tab="calls">Callers &amp; callees</button>
           <button data-tab="phases">Phases</button>
+          <button data-tab="during" id="tab-during" hidden title="What every other thread did during the selected call or time window">Meanwhile</button>
           <div class="grow"></div>
           <span class="tab-info" id="tab-info"></span>
           <button class="icon-btn small" id="btn-collapse" title="Collapse / expand panel">▾</button>
@@ -100,6 +110,7 @@
         </div>
         <div class="tab-body" data-body="calls"><div class="calls" id="calls"></div></div>
         <div class="tab-body" data-body="phases"><div class="calls" id="phases"></div></div>
+        <div class="tab-body" data-body="during"><div class="calls" id="during"></div></div>
       </div>
     </section>
 
@@ -149,14 +160,17 @@
       <div><kbd>Scroll</kbd><span>Scroll vertically through deep stacks</span></div>
       <div><kbd>Drag</kbd><span>Pan in any direction</span></div>
       <div><kbd>Drag overview</kbd><span>Select a time range to zoom into (Timeline / Tasks)</span></div>
-      <div><kbd>1</kbd> … <kbd>6</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph</span></div>
+      <div><kbd>Click a call</kbd><span>Timeline (all threads): show what every other thread did meanwhile</span></div>
+      <div><kbd>Drag time axis</kbd><span>Timeline (all threads): pick a time window to compare threads</span></div>
+      <div><kbd>Click a name</kbd><span>Timeline (all threads): expand / collapse a thread or process</span></div>
+      <div><kbd>1</kbd> … <kbd>7</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph · Threads</span></div>
       <div><kbd>→ chips</kbd><span>In the source panel, click what a line calls to jump into it</span></div>
       <div><kbd>Alt + ←</kbd> <kbd>Alt + →</kbd><span>Back / forward through visited code</span></div>
       <div><kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd><span>Zoom in · out · reset</span></div>
       <div><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd><span>Pan and scroll</span></div>
       <div><kbd>/</kbd><span>Search</span></div>
       <div><kbd>S</kbd><span>Toggle source panel</span></div>
-      <div><kbd>Esc</kbd><span>Close panel · go up in Map · reset zoom · clear selection</span></div>
+      <div><kbd>Esc</kbd><span>Close panel · go up in Map · clear time window · reset zoom · clear selection</span></div>
     </div>
   </div>
 </div>

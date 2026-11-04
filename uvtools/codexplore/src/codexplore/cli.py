@@ -6,6 +6,11 @@ import sys
 from codexplore.runner import exec_profile, run_profile
 from codexplore.server import serve_analysis
 
+CPU_HELP = (
+    "Record CPU samples only, without the wall-clock timeline across threads "
+    "(smaller files, no waiting time)."
+)
+
 
 @click.group()
 @click.version_option()
@@ -34,7 +39,8 @@ def main():
     default=False,
     help="Profile subprocesses as well.",
 )
-def run_cmd(script, script_args, python, rate, subprocesses):
+@click.option("--cpu", is_flag=True, default=False, help=CPU_HELP)
+def run_cmd(script, script_args, python, rate, subprocesses, cpu):
     """Profile a Python script.
 
     Usage: codexplore run <script.py> [-- script args...]
@@ -45,6 +51,7 @@ def run_cmd(script, script_args, python, rate, subprocesses):
         python=python,
         rate=rate,
         subprocesses=subprocesses,
+        cpu=cpu,
     )
     if run_id:
         click.echo(f"\n✅ Profile saved. Run ID: {click.style(run_id, fg='green', bold=True)}")
@@ -68,7 +75,8 @@ def run_cmd(script, script_args, python, rate, subprocesses):
     default=False,
     help="Profile subprocesses as well.",
 )
-def exec_cmd(command, rate, subprocesses):
+@click.option("--cpu", is_flag=True, default=False, help=CPU_HELP)
+def exec_cmd(command, rate, subprocesses, cpu):
     """Profile any command (must be a Python process).
 
     Usage: codexplore exec -- harbor run <task>
@@ -78,6 +86,7 @@ def exec_cmd(command, rate, subprocesses):
         command=list(command),
         rate=rate,
         subprocesses=subprocesses,
+        cpu=cpu,
     )
     if run_id:
         click.echo(f"\n✅ Profile saved. Run ID: {click.style(run_id, fg='green', bold=True)}")

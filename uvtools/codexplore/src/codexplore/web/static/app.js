@@ -22,6 +22,8 @@ const INTERNAL_NAMES = new Set(["_call_with_frames_removed", "_find_and_load", "
   "_load_unlocked", "_load", "_gcd_import", "_handle_fromlist", "_bootstrap", "_bootstrap_external", "__import__"]);
 const TASK_STEP_RE = /^(?:Task\.__step|Task\.\w*step|TaskGroup\._spawn|_task_step)/;
 const ASYNC_INTERNAL_RE = /asyncio[\\/]|_selector_events|_unix_events|selectors\.py|threading\.py/;
+const PROC_FRAME_RE = /^process (\d+):"([\s\S]*)"$/;   // root frames py-spy adds with --subprocesses
+const BOOTSTRAP_FILE_RE = /(?:^|[\\/])threading\.py$|concurrent[\\/]futures[\\/]thread\.py$|multiprocessing[\\/](?:process|spawn|context|popen_\w+|pool|util)\.py$/;
 
 /* ═══════════════════════════ Helpers ═══════════════════════════ */
 
@@ -114,10 +116,13 @@ const S = {
   selFn: -1, hoverFn: -1,
   sort: { key: "self", asc: false },
   phaseLevel: clamp(+store.get("phaseLevel", 1) || 1, 1, 8),
+  waiting: store.get("waiting", "hide") === "show" ? "show" : "hide",
+  tl: null,   // wall-clock timeline data, for runs recorded with timestamps
 };
-const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph"];
+const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph", "threads"];
+const STATIC_VIEWS = new Set(["map", "graph", "threads"]);
 if (!VIEWS.includes(S.view)) S.view = "flame";
-if (!["functions", "tree", "calls", "phases"].includes(S.tab)) S.tab = "functions";
+if (!["functions", "tree", "calls", "phases", "during"].includes(S.tab)) S.tab = "functions";
 
 let FN = [];                 // function table: unique (name, file)
 let fnByKey = new Map();
@@ -180,8 +185,12 @@ function buildFunctions() {
     const f = frames[i] || {}, name = f.name || "<frame " + i + ">", file = f.file || "", line = f.line || 0;
     const key = name + "\u0000" + file;
     let fo = fnByKey.get(key);
-    if (!fo) { fo = makeFn(name, file, line); fnByKey.set(key, fo); }
-    else if (line > 0 && (fo.line === 0 || line < fo.line)) fo.line = line;
+    if (!fo) {
+      fo = makeFn(name, file, line);
+      fnByKey.set(key, fo);
+      const pm = !file && PROC_FRAME_RE.exec(name);
+      if (pm) { fo.proc = { pid: +pm[1], cmd: pm[2] }; fo.internal = true; }
+    } else if (line > 0 && (fo.line === 0 || line < fo.line)) fo.line = line;
     frameFn[i] = fo.id;
     frameLine[i] = line;
   }
@@ -193,12 +202,102 @@ function synthFn(key, name, cat, group) {
   return fo.id;
 }
 
+/* ═══════════════════════════ Processes & threads ═══════════════════════════ */
+
+let PROFILES = null, PROCS = null;
+
+function shortCmd(cmd) {
+  if (!cmd) {
+    const c = S.meta?.command || S.meta?.script || "";
+    return c ? shortCmd(c) : "main process";
+  }
+  if (/multiprocessing\.resource_tracker/.test(cmd)) return "multiprocessing resource tracker";
+  if (/multiprocessing\.forkserver/.test(cmd)) return "multiprocessing fork server";
+  if (/multiprocessing[.\w]*spawn|--multiprocessing-fork/.test(cmd)) return "multiprocessing worker";
+  const toks = cmd.split(/\s+/).filter(Boolean);
+  if (toks.length && /(?:^|\/)python[\d.]*$/.test(toks[0])) toks.shift();
+  if (toks[0] === "-m") return toks.slice(0, 2).join(" ");
+  if (toks[0] === "-c") { const code = toks.slice(1).join(" "); return "python -c " + (code.length > 30 ? code.slice(0, 29) + "…" : code); }
+  if (toks.length) toks[0] = toks[0].split("/").pop();
+  return toks.join(" ");
+}
+
+// Per-profile identity (process, thread id, name, active time) and the process tree.
+function profileInfo() {
+  if (PROFILES) return PROFILES;
+  const profs = S.raw.profiles || [], frames = S.raw.shared?.frames || [];
+  PROCS = new Map();
+  PROFILES = profs.map((p, i) => {
+    const m = /^(?:Process (\d+) )?Thread (\d+)(?: "([^"]*)")?/.exec(p.name || "") || [];
+    const weights = Array.isArray(p.weights) && p.weights.length ? p.weights : null, idle = p.idle;
+    let total = 0, wall = 0;
+    if (weights) for (let s = 0; s < weights.length; s++) { const v = +weights[s] || 0; wall += v; if (!(idle && idle[s])) total += v; }
+    else total = wall = (p.samples || []).length;
+    const scale = UNIT_SCALE[p.unit], timed = !!weights && scale !== undefined;
+    const chain = [];
+    const stk = (p.samples || []).find(s => s && s.length) || [];
+    for (const idx of stk) { const fo = FN[frameFn[idx]]; if (!fo || !fo.proc) break; chain.push(fo.proc); }
+    const pid = m[1] ? +m[1] : chain.length ? chain[chain.length - 1].pid : 0;
+    for (let k = 0; k < chain.length; k++) {
+      const c = chain[k];
+      if (!PROCS.has(c.pid)) PROCS.set(c.pid, { pid: c.pid, cmd: c.cmd, parent: k ? chain[k - 1].pid : 0, threads: [], total: 0 });
+    }
+    if (!PROCS.has(pid)) PROCS.set(pid, { pid, cmd: "", parent: 0, threads: [], total: 0 });
+    const name = m[3] || "", tid = m[2] ? +m[2] : i;
+    return {
+      i, pid, tid, name, label: name || (tid === pid ? "MainThread" : "Thread " + tid), total, timed, scale: timed ? scale : 1,
+      secs: timed ? total * scale : total, wall: timed ? wall * scale : wall,
+    };
+  });
+  for (const pi of PROFILES) { const pr = PROCS.get(pi.pid); pr.threads.push(pi.i); pr.total += pi.secs; }
+  for (const [pid, extra] of Object.entries(S.raw.codexplore?.processes || {})) {
+    const pr = PROCS.get(+pid);
+    if (!pr) continue;
+    if (!pr.cmd) pr.cmd = extra.cmd || "";
+    if (!pr.parent && PROCS.has(extra.ppid)) pr.parent = extra.ppid;
+  }
+  for (const pr of PROCS.values()) pr.short = shortCmd(pr.cmd);
+  return PROFILES;
+}
+
 /* ═══════════════════════════ Per-thread processing ═══════════════════════════ */
+
+// Appends the frame-filtered stack (root → leaf) of one raw sample to fnA / lnA.
+function filterStack(stk, mode, fnA, lnA) {
+  const start = fnA.length;
+  let inLibRun = false;
+  for (let i = 0; i < stk.length; i++) {
+    const idx = stk[i], f = frameFn[idx];
+    if (f === undefined) continue;
+    const fo = FN[f];
+    if (fo.proc) continue;
+    if (mode === "all") { fnA.push(f); lnA.push(frameLine[idx]); continue; }
+    if (fo.internal) continue;
+    if (mode === "internals" || fo.cat === "user") { fnA.push(f); lnA.push(frameLine[idx]); inLibRun = false; continue; }
+    if (mode === "collapse" && !inLibRun) {
+      fnA.push(synthFn("lib:" + fo.group, "[" + fo.group + "]", fo.cat, fo.group)); lnA.push(0);
+      inLibRun = true;
+    }
+  }
+  if (fnA.length === start) {
+    if (!stk.length) fnA.push(synthFn("empty", "(no Python frames)", "internal", "empty"));
+    else fnA.push(synthFn("other", mode === "mine" ? "(outside your code)" : "(interpreter internals)", "internal", "other"));
+    lnA.push(0);
+  }
+}
 
 function prepareThread() {
   const p = S.raw.profiles[S.thread] || { samples: [] };
-  const samples = p.samples || [], n = samples.length;
-  const weights = Array.isArray(p.weights) && p.weights.length === n ? p.weights : null;
+  let samples = p.samples || [], weights = Array.isArray(p.weights) && p.weights.length === samples.length ? p.weights : null;
+  let times = p.times || null;
+  if (p.idle && S.waiting === "hide") {
+    const keep = [];
+    for (let s = 0; s < samples.length; s++) if (!p.idle[s]) keep.push(s);
+    samples = keep.map(s => samples[s]);
+    if (weights) weights = keep.map(s => weights[s]);
+    if (times) times = keep.map(s => times[s]);
+  }
+  const n = samples.length;
   const scale = UNIT_SCALE[p.unit];
   const w = new Float64Array(n), starts = new Float64Array(n + 1);
   let total = 0;
@@ -208,26 +307,7 @@ function prepareThread() {
   // Filtered stacks (root → leaf), flattened.
   const mode = S.frames, fnA = [], lnA = [], offs = new Int32Array(n + 1);
   for (let s = 0; s < n; s++) {
-    const stk = samples[s] || [];
-    const start = fnA.length;
-    let inLibRun = false;
-    for (let i = 0; i < stk.length; i++) {
-      const idx = stk[i], f = frameFn[idx];
-      if (f === undefined) continue;
-      const fo = FN[f];
-      if (mode === "all") { fnA.push(f); lnA.push(frameLine[idx]); continue; }
-      if (fo.internal) continue;
-      if (mode === "internals" || fo.cat === "user") { fnA.push(f); lnA.push(frameLine[idx]); inLibRun = false; continue; }
-      if (mode === "collapse" && !inLibRun) {
-        fnA.push(synthFn("lib:" + fo.group, "[" + fo.group + "]", fo.cat, fo.group)); lnA.push(0);
-        inLibRun = true;
-      }
-    }
-    if (fnA.length === start) {
-      if (!stk.length) fnA.push(synthFn("empty", "(no Python frames)", "internal", "empty"));
-      else fnA.push(synthFn("other", mode === "mine" ? "(outside your code)" : "(interpreter internals)", "internal", "other"));
-      lnA.push(0);
-    }
+    filterStack(samples[s] || [], mode, fnA, lnA);
     offs[s + 1] = fnA.length;
   }
   const sFn = Int32Array.from(fnA), sLine = Int32Array.from(lnA);
@@ -282,11 +362,10 @@ function prepareThread() {
   const heat = new Array(nf);
   for (let f = 0; f < nf; f++) heat[f] = heatColor(total ? self[f] / total : 0);
 
-  const tm = /"([^"]*)"/.exec(p.name || ""), tid = /Thread (\d+)/.exec(p.name || "");
   T = {
-    index: S.thread, name: (tm && tm[1]) || (tid ? "Thread " + tid[1] : p.name || "Thread " + S.thread),
+    index: S.thread, name: profileInfo()[S.thread]?.label || "Thread " + S.thread,
     timed: scale !== undefined, scale: scale || 1, n, w, starts, total, offs, sFn, sLine, maxDepth,
-    self, tot, fnLines, lineStats, lineCallees, heat, raw: samples,
+    self, tot, fnLines, lineStats, lineCallees, heat, raw: samples, times,
     tree: null, inv: null, timeline: null, tasks: null, treemap: null, edges: null, phases: new Map(),
   };
   updateSearchMatch();
@@ -567,8 +646,9 @@ class Chart {
     }
   }
 
+  axisTotal() { return this.model && this.model.axisSpan != null ? this.model.axisSpan : T.timed ? T.total * T.scale : T.total; }
   drawAxis(ctx) {
-    const W = this.W, left = this.left, tTot = T.timed ? T.total * T.scale : T.total;
+    const W = this.W, left = this.left, tTot = this.axisTotal();
     const t0 = this.x0 * tTot, t1 = this.x1 * tTot, step = niceStep((t1 - t0) / Math.max(1, this.pw / 110));
     ctx.fillStyle = "#0e1117"; ctx.fillRect(0, 0, W, AXIS);
     ctx.fillStyle = "#20252f"; ctx.fillRect(0, AXIS - 1, W, 1);
@@ -581,7 +661,7 @@ class Chart {
     }
   }
   drawGrid(ctx) {
-    const tTot = T.timed ? T.total * T.scale : T.total;
+    const tTot = this.axisTotal();
     const t0 = this.x0 * tTot, t1 = this.x1 * tTot, step = niceStep((t1 - t0) / Math.max(1, this.pw / 110));
     ctx.fillStyle = "rgba(255,255,255,.035)";
     for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) {
@@ -688,11 +768,21 @@ class Chart {
       if (e.button !== 0 || !this.model) return;
       if (e.target.closest(".hbar,.vbar")) return;
       p.setPointerCapture(e.pointerId);
-      down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, drag: false };
+      const py = e.clientY - p.getBoundingClientRect().top;
+      down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, drag: false, brush: !!this.model.onBrush && py < AXIS };
     });
     p.addEventListener("pointermove", e => {
       if (!this.model) return;
       this.mouse = { clientX: e.clientX, clientY: e.clientY };
+      if (down && down.brush) {
+        const r = p.getBoundingClientRect();
+        if (Math.abs(e.clientX - down.x) > 3) {
+          down.drag = true; hideTip();
+          this.selDrag = [this.pxToX(Math.max(this.left, down.x - r.left)), this.pxToX(clamp(e.clientX - r.left, this.left, this.W))];
+          this.request();
+        }
+        return;
+      }
       if (down) {
         if (!down.drag && !this.model.static && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
           down.drag = true; this.dragging = true; p.classList.add("grabbing"); hideTip(); this.cancelAnim();
@@ -705,16 +795,23 @@ class Chart {
       }
       if (e.target.closest(".hbar,.vbar")) { this.hover(null, e); return; }
       this.hover(this.hitAt(e), e);
+      if (this.model.cursor) this.request();
     });
     const end = e => {
       if (!down) return;
       const wasDrag = down.drag;
+      if (down.brush && this.selDrag) {
+        const [a, b] = this.selDrag;
+        this.selDrag = null;
+        if (wasDrag && e.type === "pointerup") this.model.onBrush(Math.min(a, b), Math.max(a, b));
+        this.request();
+      }
       down = null; this.dragging = false; p.classList.remove("grabbing");
       if (!wasDrag && e.type === "pointerup" && this.onClick) this.onClick(this.hitAt(e), e);
     };
     p.addEventListener("pointerup", end);
     p.addEventListener("pointercancel", end);
-    p.addEventListener("pointerleave", e => { if (!down && this.model) { this.mouse = null; this.hover(null, e); } });
+    p.addEventListener("pointerleave", e => { if (!down && this.model) { this.mouse = null; this.hover(null, e); if (this.model.cursor) this.request(); } });
     p.addEventListener("dblclick", e => {
       if (!this.model || e.target.closest(".hbar,.vbar")) return;
       const it = this.hitAt(e);
@@ -948,6 +1045,501 @@ function tasksModel() {
   };
 }
 
+/* ═══════════════════════════ Wall-clock lanes (all threads) ═══════════════════════════ */
+
+const LSTRIP = 18, LPROC = 22, LIDLE = 18;
+const LN = { cache: new Map(), mode: null, expanded: new Set(), collapsedProcs: new Set(), showIdle: new Set(), win: null, layout: null, init: false, hoverLane: -1 };
+let hatchPat = null;
+
+function hatch(ctx) {
+  if (hatchPat) return hatchPat;
+  const c = document.createElement("canvas"), dpr = window.devicePixelRatio || 1, n = Math.round(6 * dpr);
+  c.width = c.height = n;
+  const g = c.getContext("2d");
+  g.fillStyle = "#171b25"; g.fillRect(0, 0, n, n);
+  g.strokeStyle = "rgba(150,160,185,.28)"; g.lineWidth = dpr;
+  g.beginPath(); g.moveTo(0, n); g.lineTo(n, 0); g.moveTo(-n / 2, n / 2); g.lineTo(n / 2, -n / 2); g.moveTo(n / 2, n * 1.5); g.lineTo(n * 1.5, n / 2); g.stroke();
+  hatchPat = ctx.createPattern(c, "repeat");
+  if (hatchPat && hatchPat.setTransform) hatchPat.setTransform(new DOMMatrix([1 / dpr, 0, 0, 1 / dpr, 0, 0]));
+  return hatchPat;
+}
+
+function procTree() {
+  profileInfo();
+  const out = [], kids = pid => Array.from(PROCS.values()).filter(c => c.parent === pid && c.pid !== pid).sort((a, b) => b.total - a.total);
+  const visit = (pr, depth) => { out.push({ pr, depth }); for (const c of kids(pr.pid)) visit(c, depth + 1); };
+  for (const r of Array.from(PROCS.values()).filter(p => !p.parent || !PROCS.has(p.parent)).sort((a, b) => b.total - a.total)) visit(r, 0);
+  return out;
+}
+
+// One thread on the wall clock: segments [t0, t1) with their filtered stack, waiting flag and the
+// function that best says what the thread is doing (deepest frame of your code, else the leaf).
+function laneData(i) {
+  if (LN.mode !== S.frames) { LN.cache.clear(); LN.mode = S.frames; LN.layout = null; }
+  const hit = LN.cache.get(i);
+  if (hit) return hit;
+  const p = S.raw.profiles[i], samples = p.samples || [], n = samples.length, span = S.tl.span || 1;
+  const t0 = new Float64Array(n), t1 = new Float64Array(n), idle = new Uint8Array(n), focus = new Int32Array(n), focusLine = new Int32Array(n), leaf = new Int32Array(n);
+  const offs = new Int32Array(n + 1), fnA = [], lnA = [], runs = [];
+  let active = 0;
+  for (let s = 0; s < n; s++) {
+    t0[s] = +p.times[s] || 0; t1[s] = t0[s] + (+p.weights[s] || 0); idle[s] = p.idle ? p.idle[s] : 0;
+    const a = fnA.length;
+    filterStack(samples[s] || [], S.frames, fnA, lnA);
+    offs[s + 1] = fnA.length;
+    let f = -1, ln = 0;
+    for (let k = fnA.length - 1; k >= a; k--) if (FN[fnA[k]].cat === "user") { f = fnA[k]; ln = lnA[k]; break; }
+    if (f < 0) { f = fnA[fnA.length - 1]; ln = lnA[lnA.length - 1]; }
+    focus[s] = f; focusLine[s] = ln; leaf[s] = fnA.length > a ? fnA[fnA.length - 1] : -1;
+    if (!idle[s]) active += t1[s] - t0[s];
+    const last = runs[runs.length - 1];
+    if (last && last.fn === f && last.idle === idle[s] && Math.abs(last.te - t0[s]) < 1e-6) { last.te = t1[s]; last.w = (last.te - last.ts) / span; last.s1 = s + 1; }
+    else runs.push({ fn: f, idle: idle[s], ts: t0[s], te: t1[s], x: t0[s] / span, w: (t1[s] - t0[s]) / span, s0: s, s1: s + 1 });
+  }
+  const d = { i, n, t0, t1, idle, focus, focusLine, leaf, offs, sFn: Int32Array.from(fnA), sLine: Int32Array.from(lnA), runs, rows: null, active };
+  LN.cache.set(i, d);
+  return d;
+}
+
+// Flame-chart rows for an expanded lane, positioned on the wall clock.
+function laneRows(d) {
+  if (d.rows) return d.rows;
+  const { n, t0, t1, idle, offs, sFn } = d, span = S.tl.span || 1, rows = [], open = [];
+  for (let s = 0; s < n; s++) {
+    if (s && t0[s] - t1[s - 1] > 1e-6) open.length = 0;
+    const a = offs[s], len = offs[s + 1] - a, dur = t1[s] - t0[s];
+    let k = 0;
+    while (k < open.length && k < len && open[k].fn === sFn[a + k]) k++;
+    for (let j = 0; j < k; j++) { const b = open[j]; b.te = t1[s]; b.w = (b.te - b.ts) / span; b.s1 = s + 1; b.wall += dur; if (idle[s]) b.waitW += dur; }
+    open.length = k;
+    for (let j = k; j < len; j++) {
+      const b = { fn: sFn[a + j], d: j, ts: t0[s], te: t1[s], x: t0[s] / span, w: dur / span, s0: s, s1: s + 1, wall: dur, waitW: idle[s] ? dur : 0 };
+      (rows[j] || (rows[j] = [])).push(b);
+      open.push(b);
+    }
+  }
+  for (let j = 0; j < rows.length; j++) if (!rows[j]) rows[j] = [];
+  return (d.rows = rows);
+}
+
+function segAt(d, t) {
+  let lo = 0, hi = d.n - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (d.t0[m] <= t) lo = m; else hi = m - 1; }
+  return d.n && d.t0[lo] <= t && t < d.t1[lo] ? lo : -1;
+}
+
+function laneLayout() {
+  if (LN.layout) return LN.layout;
+  const info = profileInfo(), multi = PROCS.size > 1, tree = procTree();
+  if (!LN.init) {
+    LN.init = true;
+    LN.expanded.add(S.thread);
+    if (tree.length > 6) for (const { pr } of tree) if (pr.pid !== info[S.thread].pid) LN.collapsedProcs.add(pr.pid);
+  }
+  const items = [];
+  let y = 0;
+  for (const { pr, depth } of tree) {
+    if (multi) { items.push({ type: "proc", pr, depth, y, h: LPROC }); y += LPROC; }
+    if (multi && LN.collapsedProcs.has(pr.pid)) continue;
+    const lanes = pr.threads.map(laneData).sort((a, b) => b.active - a.active);
+    const shown = lanes.filter(d => d.active > 0 || d.i === S.thread || LN.showIdle.has(pr.pid)), hidden = lanes.filter(d => !shown.includes(d));
+    for (const d of shown) {
+      const exp = LN.expanded.has(d.i), rows = exp ? laneRows(d) : null, h = LSTRIP + (exp ? rows.length * ROW + 4 : 0);
+      items.push({ type: "lane", d, pi: info[d.i], y, h, exp, rows });
+      y += h;
+    }
+    if (hidden.length) { items.push({ type: "idle", pr, lanes: hidden, y, h: LIDLE }); y += LIDLE; }
+  }
+  return (LN.layout = { items, height: y });
+}
+
+function laneItemAt(y) {
+  const { items } = laneLayout();
+  let lo = 0, hi = items.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (items[m].y <= y) lo = m; else hi = m - 1; }
+  const it = items[lo];
+  return it && y >= it.y && y < it.y + it.h ? it : null;
+}
+
+// Phases of the current thread, mapped from its active-sample positions onto the wall clock.
+function phaseWall(p) {
+  if (!S.tl || !T.times) return [p.x, p.w];
+  const span = S.tl.span || 1, a = T.times[p.s0], b = T.times[p.s1 - 1] + T.w[p.s1 - 1];
+  return [a / span, Math.max(0, b - a) / span];
+}
+
+function lanesModel() {
+  const span = S.tl.span || 1;
+  const lay = () => laneLayout();
+  return {
+    kind: "lanes", gutter: GUTTER, top: AXIS + BAND, minSpan: Math.max(1e-7, 2e-5 / span), axisSpan: span, cursor: true,
+    hitHeader: (px, py, v) => phaseBandHit(px, py, v, phaseWall),
+    onBrush(a, b) { if ((b - a) * span > 1e-4) setWindow({ t0: a * span, t1: b * span, fn: -1, lane: -1 }); },
+    height: () => lay().height + 6,
+    drawMini(ctx, left, pw, H) {
+      const lanes = lay().items.filter(it => it.type === "lane"), rh = Math.max(1, Math.min(4, (H - 4) / Math.max(1, lanes.length)));
+      lanes.forEach((it, k) => {
+        if (2 + k * rh > H) return;
+        let last = -1;
+        for (const r of it.d.runs) {
+          if (r.idle) continue;
+          const px = left + r.x * pw, w = r.w * pw;
+          if (w < 1) { const ip = px | 0; if (ip <= last) continue; last = ip; } else last = (px + w) | 0;
+          ctx.fillStyle = FN[r.fn] ? FN[r.fn].color : INTERNAL_COLOR;
+          ctx.fillRect(px, 2 + k * rh, Math.max(1, w), Math.max(1, rh - (rh > 2 ? 0.5 : 0)));
+        }
+      });
+    },
+    draw(ctx, v) {
+      const { items } = lay(), sx = v.pw / v.span, top = v.top, sy = v.sy;
+      v.drawGrid(ctx);
+      const first = laneItemAt(sy), i0 = first ? items.indexOf(first) : 0;
+      const runsIn = (runs, fnDraw) => {
+        let last = -1;
+        for (let k = lowerBound(runs, v.x0); k < runs.length; k++) {
+          const r = runs[k];
+          if (r.x >= v.x1) break;
+          const px = v.left + (r.x - v.x0) * sx, pw = r.w * sx;
+          if (pw < 1) { const ip = px | 0; if (ip <= last) continue; last = ip; } else last = (px + pw) | 0;
+          fnDraw(r, px, pw);
+        }
+      };
+      const waitBox = (px, y, pw, h) => {
+        const a = Math.max(px, v.left), b = Math.min(px + Math.max(pw, 1), v.W);
+        if (b <= a) return;
+        ctx.fillStyle = hatch(ctx); ctx.fillRect(a, y, Math.max(1, b - a - (b - a > 3 ? 1 : 0)), h - 1);
+      };
+      for (let k = i0; k < items.length; k++) {
+        const it = items[k], y = it.y - sy + top;
+        if (y > v.H) break;
+        if (it.type === "proc") {
+          ctx.fillStyle = "#10141d"; ctx.fillRect(v.left, y, v.W - v.left, it.h);
+          ctx.fillStyle = "rgba(130,160,255,.30)";
+          for (const i of it.pr.threads) runsIn(laneData(i).runs, (r, px, pw) => { if (!r.idle) ctx.fillRect(Math.max(px, v.left), y + 5, Math.max(1, pw), it.h - 10); });
+          ctx.fillStyle = "#20252f"; ctx.fillRect(v.left, y + it.h - 1, v.W - v.left, 1);
+        } else if (it.type === "lane") {
+          const cur = it.d.i === S.thread;
+          if (cur) { ctx.fillStyle = "rgba(130,160,255,.05)"; ctx.fillRect(v.left, y, v.W - v.left, it.h); }
+          runsIn(it.d.runs, (r, px, pw) => {
+            if (r.idle) waitBox(px, y + 2, pw, LSTRIP - 3);
+            else v.box(ctx, px, y + 2, pw, LSTRIP - 3, r.fn, pw > 60 ? null : "");
+          });
+          if (it.exp) {
+            const ry = y + LSTRIP + 2, d0 = Math.max(0, Math.floor((top - ry) / ROW)), d1 = Math.min(it.rows.length - 1, Math.floor((v.H - ry) / ROW));
+            for (let dd = d0; dd <= d1; dd++) {
+              const by = ry + dd * ROW;
+              runsIn(it.rows[dd], (b, px, pw) => {
+                if (b.waitW >= 0.95 * b.wall) {
+                  waitBox(px, by, pw, ROW);
+                  if (pw > 40) { const t = v.fit(FN[b.fn].disp, pw - 8); if (t) { ctx.fillStyle = "rgba(200,206,220,.7)"; ctx.fillText(t, Math.max(px, v.left) + 4, by + ROW / 2); } }
+                } else v.box(ctx, px, by, pw, ROW, b.fn, null);
+              });
+            }
+          }
+          ctx.fillStyle = "#1a1f2a"; ctx.fillRect(v.left, y + it.h - 1, v.W - v.left, 1);
+        }
+      }
+      // Selected window, brush and cursor
+      const shade = (a, b) => { const pa = v.left + (a - v.x0) * sx, pb = v.left + (b - v.x0) * sx; return [clamp(pa, v.left, v.W), clamp(pb, v.left, v.W)]; };
+      if (LN.win) {
+        const [a, b] = shade(LN.win.t0 / span, LN.win.t1 / span);
+        ctx.fillStyle = "rgba(5,7,10,.55)";
+        ctx.fillRect(v.left, top, a - v.left, v.H - top); ctx.fillRect(b, top, v.W - b, v.H - top);
+        ctx.fillStyle = "rgba(130,160,255,.85)"; ctx.fillRect(a, top, 1, v.H - top); ctx.fillRect(Math.max(a, b - 1), top, 1, v.H - top);
+      }
+      if (v.selDrag) {
+        const [a, b] = shade(Math.min(...v.selDrag), Math.max(...v.selDrag));
+        ctx.fillStyle = "rgba(130,160,255,.16)"; ctx.fillRect(a, top, b - a, v.H - top);
+      }
+      // Gutter
+      ctx.fillStyle = "#0e1117"; ctx.fillRect(0, top, v.left, v.H - top);
+      for (let k = i0; k < items.length; k++) {
+        const it = items[k], y = it.y - sy + top;
+        if (y > v.H) break;
+        if (y + it.h < top) continue;
+        if (it.type === "proc") {
+          ctx.fillStyle = "#141926"; ctx.fillRect(0, y, v.left - 1, it.h);
+          const open = !LN.collapsedProcs.has(it.pr.pid), ind = 8 + Math.min(it.depth, 4) * 10;
+          ctx.fillStyle = "#8a93a8"; ctx.fillText(open ? "▾" : "▸", ind, y + it.h / 2);
+          const amt = fmtDur(it.pr.total), aw = amt.length * v.charW;
+          ctx.fillStyle = "#687088"; ctx.fillText(amt, v.left - 10 - aw, y + it.h / 2);
+          ctx.fillStyle = "#dfe4ee"; ctx.fillText(v.fit(it.pr.short + "  " + it.pr.pid, v.left - ind - 30 - aw), ind + 14, y + it.h / 2);
+        } else if (it.type === "lane") {
+          const cur = it.d.i === S.thread, hov = it.d.i === LN.hoverLane;
+          if (cur || hov) { ctx.fillStyle = cur ? "#1b2440" : "#181d29"; ctx.fillRect(0, y, v.left - 1, LSTRIP); }
+          if (cur) { ctx.fillStyle = "#7c9bff"; ctx.fillRect(0, y, 2, it.h); }
+          const ind = PROCS.size > 1 ? 22 : 8;
+          ctx.fillStyle = "#8a93a8"; ctx.fillText(it.exp ? "▾" : "▸", ind, y + LSTRIP / 2);
+          const amt = fmtDur(it.d.active), aw = amt.length * v.charW;
+          ctx.fillStyle = "#687088"; ctx.fillText(amt, v.left - 10 - aw, y + LSTRIP / 2);
+          ctx.fillStyle = cur ? "#ffffff" : "#c9cfdc"; ctx.fillText(v.fit(it.pi.label, v.left - ind - 30 - aw), ind + 14, y + LSTRIP / 2);
+        } else {
+          ctx.fillStyle = "#687088";
+          ctx.fillText(v.fit("+ " + it.lanes.length + " idle thread" + (it.lanes.length === 1 ? "" : "s") + " · show", v.left - 30), PROCS.size > 1 ? 36 : 22, y + it.h / 2);
+        }
+      }
+      ctx.fillStyle = "#20252f"; ctx.fillRect(v.left - 1, top, 1, v.H - top);
+      v.drawAxis(ctx);
+      drawPhaseBand(ctx, v, phaseWall);
+      ctx.fillStyle = "#0e1117"; ctx.fillRect(0, 0, v.left, AXIS + BAND);
+      ctx.fillStyle = "#687088";
+      ctx.fillText(v.fit("wall clock · drag axis to select", v.left - 16), 12, AXIS / 2);
+      ctx.fillText(v.fit("phases · " + T.name, v.left - 16), 12, AXIS + BAND / 2);
+      ctx.fillStyle = "#20252f"; ctx.fillRect(0, AXIS - 1, v.left, 1); ctx.fillRect(0, AXIS + BAND - 1, v.left, 1); ctx.fillRect(v.left - 1, 0, 1, AXIS + BAND);
+      if (LN.win) {
+        const [a, b] = shade(LN.win.t0 / span, LN.win.t1 / span);
+        ctx.fillStyle = "rgba(130,160,255,.28)"; ctx.fillRect(a, 0, Math.max(1, b - a), AXIS - 1);
+      }
+      if (v.selDrag) {
+        const [a, b] = shade(Math.min(...v.selDrag), Math.max(...v.selDrag)), lbl = fmtDur(Math.abs(v.selDrag[1] - v.selDrag[0]) * span);
+        ctx.fillStyle = "rgba(130,160,255,.4)"; ctx.fillRect(a, 0, b - a, AXIS - 1);
+        ctx.fillStyle = "#fff"; ctx.fillText(lbl, a + 4, AXIS / 2);
+      }
+      const m = v.mouse && !v.dragging ? v.mouse : null;
+      if (m) {
+        const r = v.plot.getBoundingClientRect(), mx = m.clientX - r.left, my = m.clientY - r.top;
+        if (mx > v.left && mx < v.W && my > 0 && my < v.H) {
+          ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(Math.round(mx), top, 1, v.H - top);
+          const lbl = fmtAxis(v.pxToX(mx) * span, (v.span * span) / 200), lw = lbl.length * v.charW + 10;
+          ctx.fillStyle = "#2a3350"; ctx.fillRect(Math.round(mx) - lw / 2, 1, lw, AXIS - 3);
+          ctx.fillStyle = "#e8ecf5"; ctx.fillText(lbl, Math.round(mx) - lw / 2 + 5, AXIS / 2);
+        }
+      }
+    },
+    hit(px, py, v) {
+      const yy = py - v.top + v.sy, it = laneItemAt(yy);
+      if (!it) return null;
+      if (px < v.left) {
+        if (it.type === "proc") return { kind: "lproc", key: "p" + it.pr.pid, pr: it.pr };
+        if (it.type === "idle") return { kind: "lidle", key: "i" + it.pr.pid, item: it };
+        return { kind: "llabel", key: "l" + it.d.i, lane: it };
+      }
+      const x = v.pxToX(px), t = x * span;
+      if (it.type === "proc") return { kind: "lprocs", key: "ps" + it.pr.pid + ":" + Math.round(px / 3), pr: it.pr, t };
+      if (it.type !== "lane") return null;
+      const ly = yy - it.y;
+      if (ly < LSTRIP || !it.exp) {
+        const r = findAt(it.d.runs, x);
+        if (!r) return null;
+        return { kind: "lrun", key: r, lane: it, run: r, fn: r.fn, x: r.x, w: r.w, y: it.y, h: LSTRIP, t, s: segAt(it.d, t) };
+      }
+      const dd = Math.floor((ly - LSTRIP - 2) / ROW), row = it.rows[dd];
+      if (!row) return null;
+      const b = findAt(row, x);
+      if (!b) return null;
+      return { kind: "lblock", key: b, lane: it, block: b, fn: b.fn, x: b.x, w: b.w, y: it.y + LSTRIP + 2 + dd * ROW, h: ROW, t };
+    },
+  };
+}
+
+function laneTip(it) {
+  const span = S.tl.span || 1, info = profileInfo();
+  const where = lane => esc(lane.pi.label) + (PROCS.size > 1 ? ' <span class="t-dim">' + esc(PROCS.get(lane.pi.pid).short) + " · " + lane.pi.pid + "</span>" : "");
+  const stackAt = (d, s) => {
+    if (s < 0) return "";
+    const stk = S.raw.profiles[d.i].samples[s] || [], users = [];
+    for (let k = stk.length - 1; k >= 0 && users.length < 7; k--) {
+      const fo = FN[frameFn[stk[k]]];
+      if (fo.cat === "user") users.push('<div><span class="dot" style="background:' + fo.color + '"></span>' + esc(fo.disp) + ' <span class="loc">' + esc(fo.rel) + ":" + frameLine[stk[k]] + "</span></div>");
+    }
+    return users.length ? '<div class="t-stack">' + users.join("") + "</div>" : "";
+  };
+  const hint = '<div class="t-hint">Click: select &amp; see what every other thread did meanwhile · Double-click: zoom</div>';
+  if (it.kind === "lrun") {
+    const r = it.run;
+    return fnHeader(r.fn) + grid([
+      ["Thread", where(it.lane)],
+      [r.idle ? "Waiting" : "Running", "<b>" + fmtDur(r.te - r.ts) + "</b>"],
+      ["From", fmtAxis(r.ts, 0.001) + " → " + fmtAxis(r.te, 0.001)],
+    ].concat(r.idle && it.s >= 0 && FN[it.lane.d.leaf[it.s]] ? [["Blocked in", esc(FN[it.lane.d.leaf[it.s]].disp)]] : [])) + stackAt(it.lane.d, it.s) + hint;
+  }
+  if (it.kind === "lblock") {
+    const b = it.block, busy = b.wall - b.waitW;
+    return fnHeader(b.fn) + grid([
+      ["Thread", where(it.lane)],
+      ["Duration", "<b>" + fmtDur(b.te - b.ts) + "</b>"],
+      ["Running", fmtDur(busy) + " · " + fmtPct(busy, b.wall || 1)],
+      ["Waiting", fmtDur(b.waitW) + " · " + fmtPct(b.waitW, b.wall || 1)],
+      ["From", fmtAxis(b.ts, 0.001) + " → " + fmtAxis(b.te, 0.001)],
+    ]) + hint;
+  }
+  if (it.kind === "lprocs") {
+    const busy = [];
+    for (const i of it.pr.threads) {
+      const d = laneData(i), s = segAt(d, it.t);
+      if (s >= 0 && !d.idle[s]) busy.push(esc(info[i].label) + ' <span class="t-dim">' + esc(FN[d.focus[s]]?.disp || "?") + "</span>");
+    }
+    return '<div class="t-name">' + esc(it.pr.short) + ' <span class="t-dim">' + it.pr.pid + "</span></div>" +
+      grid([["At", fmtAxis(it.t, 0.001)], ["Busy threads", busy.length + " of " + it.pr.threads.length]]) +
+      (busy.length ? '<div class="t-loc">' + busy.slice(0, 10).join("<br>") + "</div>" : "") + '<div class="t-hint">Brightness = how many of its threads are running</div>';
+  }
+  if (it.kind === "lproc") {
+    const pr = it.pr;
+    return '<div class="t-name">' + esc(pr.short) + "</div>" + grid([["Process", "pid " + pr.pid + (pr.parent ? " · child of " + pr.parent : "")], ["Running", fmtDur(pr.total)], ["Threads", pr.threads.length]]) +
+      (pr.cmd ? '<div class="t-loc">' + esc(pr.cmd.length > 200 ? pr.cmd.slice(0, 199) + "…" : pr.cmd) + "</div>" : "") +
+      '<div class="t-hint">Click to ' + (LN.collapsedProcs.has(pr.pid) ? "show" : "hide") + " its threads</div>";
+  }
+  if (it.kind === "llabel") {
+    const d = it.lane.d, pi = it.lane.pi;
+    return '<div class="t-name">' + where(it.lane) + "</div>" + grid([["Running", "<b>" + fmtDur(d.active) + "</b>"], ["Alive for", fmtDur(pi.wall)], ["Waiting", fmtPct(pi.wall - d.active, pi.wall || 1)]]) +
+      '<div class="t-hint">Click to ' + (it.lane.exp ? "collapse its call stacks" : "expand its call stacks and make it the current thread") + "</div>";
+  }
+  if (it.kind === "lidle") {
+    return '<div class="t-name">' + it.item.lanes.length + " threads with no running samples</div>" +
+      '<div class="t-loc">' + it.item.lanes.slice(0, 12).map(d => esc(info[d.i].label)).join("<br>") + "</div>" + '<div class="t-hint">Click to show them</div>';
+  }
+  return "";
+}
+
+function revealLane(i) {
+  const pi = profileInfo()[i];
+  LN.expanded.add(i); LN.collapsedProcs.delete(pi.pid);
+  if (!(laneData(i).active > 0)) LN.showIdle.add(pi.pid);
+  LN.layout = null;
+  if (S.view !== "timeline") setView("timeline");
+  const it = laneLayout().items.find(x => x.type === "lane" && x.d.i === i);
+  if (it) chart.revealY(it.y, Math.min(it.h, chart.ph * 0.6));
+  chart.request();
+}
+
+function laneClick(it) {
+  const span = S.tl.span || 1;
+  if (it.kind === "lproc") { const p = it.pr.pid; LN.collapsedProcs.has(p) ? LN.collapsedProcs.delete(p) : LN.collapsedProcs.add(p); LN.layout = null; chart.request(); return true; }
+  if (it.kind === "lidle") { LN.showIdle.add(it.item.pr.pid); LN.layout = null; chart.request(); return true; }
+  if (it.kind === "llabel") {
+    const i = it.lane.d.i;
+    if (it.lane.exp) LN.expanded.delete(i); else { LN.expanded.add(i); switchThread(i, true); }
+    LN.layout = null; chart.request(); return true;
+  }
+  if (it.kind === "lrun" || it.kind === "lblock") {
+    const d = it.lane.d, src = it.kind === "lrun" ? it.run : it.block;
+    let line = 0;
+    if (it.kind === "lrun") line = it.s >= 0 ? d.focusLine[it.s] : 0;
+    else { const m = new Map(); for (let s = src.s0; s < src.s1; s++) { const ln = d.sLine[d.offs[s] + src.d]; if (ln > 0) m.set(ln, (m.get(ln) || 0) + d.t1[s] - d.t0[s]); } line = maxKey(m); }
+    switchThread(d.i, true);
+    select(src.fn, line, { reveal: false });
+    setWindow({ t0: src.ts, t1: src.te, fn: src.fn, lane: d.i, waiting: it.kind === "lrun" ? !!src.idle : src.waitW >= 0.5 * src.wall });
+    return true;
+  }
+  if (it.kind === "lprocs") { setWindow({ t0: it.t - span * chart.span * 0.01, t1: it.t + span * chart.span * 0.01, fn: -1, lane: -1 }); return true; }
+  return false;
+}
+
+function setWindow(win) {
+  LN.win = win;
+  renderDuring();
+  if (win && S.tab !== "calls" && S.tab !== "tree") setTab("during");
+  chart.request();
+}
+
+/* ─── "During selection": what every thread did in a time window ─── */
+
+function windowStats(t0, t1) {
+  const out = [];
+  for (const pi of profileInfo()) {
+    const d = laneData(pi.i);
+    let lo = 0, hi = d.n;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (d.t1[m] <= t0) lo = m + 1; else hi = m; }
+    let busy = 0, wait = 0;
+    const fns = new Map(), waits = new Map();
+    for (let s = lo; s < d.n && d.t0[s] < t1; s++) {
+      const ov = Math.min(d.t1[s], t1) - Math.max(d.t0[s], t0);
+      if (ov <= 0) continue;
+      const m = d.idle[s] ? waits : fns, f = d.idle[s] ? d.leaf[s] : d.focus[s];
+      m.set(f, (m.get(f) || 0) + ov);
+      if (d.idle[s]) wait += ov; else busy += ov;
+    }
+    if (busy + wait > 0) out.push({ pi, busy, wait, fns, waits });
+  }
+  return out;
+}
+
+function renderDuring() {
+  const el = $("#during");
+  if (!el) return;
+  if (!S.tl) {
+    el.innerHTML = '<div class="placeholder">This run has no wall-clock timestamps, so threads can’t be lined up in time.<br>' +
+      "Record it again with <code>codexplore run</code> or <code>codexplore exec</code> (without <code>--cpu</code>) to see what every thread was doing at the same moment.</div>";
+    return;
+  }
+  const win = LN.win;
+  if (!win) {
+    el.innerHTML = '<div class="placeholder">On the <b>Timeline</b>, click any call — or drag across the time axis — to see what every other thread and process was doing during that time.</div>';
+    if (S.tab === "during") $("#tab-info").textContent = "";
+    return;
+  }
+  const dur = Math.max(1e-9, win.t1 - win.t0), stats = windowStats(win.t0, win.t1), info = profileInfo(), multi = PROCS.size > 1;
+  const chips = (m, i, max, cls = "") => Array.from(m).sort((a, b) => b[1] - a[1]).slice(0, max).map(([f, w]) =>
+    '<button class="chip dchip' + cls + '" data-i="' + i + '" data-fn="' + f + '" title="' + esc(FN[f]?.rel || "") + '"><span class="dot" style="background:' + (FN[f] ? fillFor(f) : INTERNAL_COLOR) + '"></span>' +
+    esc(FN[f]?.disp || "?") + "<em>" + fmtDur(w) + "</em></button>").join("");
+  const own = win.lane >= 0 ? stats.find(r => r.pi.i === win.lane) : null;
+  const others = stats.filter(r => r !== own);
+  let h = '<div class="during-head"><span class="title">' + (win.fn >= 0 ? "While <b>" + esc(FN[win.fn].disp) + "</b> ran" + (own ? " on " + esc(own.pi.label) : "") : "Selected window") + "</span>" +
+    '<span class="stat">' + fmtAxis(win.t0, dur / 100) + " → " + fmtAxis(win.t1, dur / 100) + " · <b>" + fmtDur(dur) + "</b></span>" +
+    '<span class="grow"></span><button class="chip" data-act="zoom">Zoom to window</button><button class="chip" data-act="clear">Clear</button></div>';
+  if (own) {
+    const waitPct = own.wait / dur;
+    h += '<div class="during-own">This thread: running <b>' + fmtDur(own.busy) + "</b> · waiting <b>" + fmtDur(own.wait) + "</b>" +
+      (own.waits.size ? ' blocked in <span class="loc">' + esc(FN[maxKey(own.waits)]?.disp || "") + "</span>" : "") +
+      (waitPct >= 0.5 ? '<span class="during-note">Mostly waiting — the work probably happened on the threads below.</span>' : "") + "</div>";
+  }
+  const allFns = new Map();
+  for (const r of others) for (const [f, w] of r.fns) allFns.set(f, (allFns.get(f) || 0) + w);
+  if (allFns.size) h += '<div class="during-all"><span class="lbl">Busiest elsewhere</span>' + chips(allFns, -1, 6) + "</div>";
+  const busyRows = others.filter(r => r.busy > 0).sort((a, b) => b.busy - a.busy), waitingOnly = others.filter(r => r.busy <= 0);
+  h += '<div class="drow dhead"><span>Thread</span><span>Running</span><span class="num">Waiting</span><span>Doing</span></div>';
+  const row = r => '<div class="drow" data-i="' + r.pi.i + '"><span class="nm">' + esc(r.pi.label) + (multi ? '<span class="loc">' + esc(PROCS.get(r.pi.pid).short) + " · " + r.pi.pid + "</span>" : "") + "</span>" +
+    '<span class="dbar"><i style="width:' + Math.min(100, r.busy / dur * 100).toFixed(1) + '%"></i><b>' + fmtDur(r.busy) + "</b> " + fmtPct(r.busy, dur) + "</span>" +
+    '<span class="num loc">' + (r.wait > 0 ? fmtDur(r.wait) : "") + "</span>" +
+    '<span class="dchips">' + chips(r.fns, r.pi.i, 3) + "</span></div>";
+  if (multi) {
+    const byProc = new Map();
+    for (const r of busyRows) (byProc.get(r.pi.pid) || byProc.set(r.pi.pid, []).get(r.pi.pid)).push(r);
+    for (const [pid, rows] of Array.from(byProc).sort((a, b) => b[1].reduce((x, r) => x + r.busy, 0) - a[1].reduce((x, r) => x + r.busy, 0))) {
+      const pr = PROCS.get(pid), busy = rows.reduce((x, r) => x + r.busy, 0);
+      h += '<div class="drow dproc"><span class="nm">' + esc(pr.short) + ' <span class="loc">' + pid + "</span></span><span><b>" + fmtDur(busy) + "</b> across " + rows.length + " thread" + (rows.length === 1 ? "" : "s") + "</span></div>";
+      h += rows.map(row).join("");
+    }
+  } else h += busyRows.map(row).join("");
+  if (!busyRows.length) h += '<div class="placeholder small">No other thread was running during this window.</div>';
+  if (waitingOnly.length) h += '<div class="during-idle">' + waitingOnly.length + " other thread" + (waitingOnly.length === 1 ? " was" : "s were") + " only waiting: " +
+    waitingOnly.slice(0, 12).map(r => esc(r.pi.label) + (multi ? ' <span class="loc">(' + esc(PROCS.get(r.pi.pid).short) + ")</span>" : "")).join(", ") + (waitingOnly.length > 12 ? ", …" : "") + "</div>";
+  el.innerHTML = h;
+  if (S.tab === "during") $("#tab-info").textContent = busyRows.length + " threads running in this window · click one to open it";
+}
+
+function bindDuring() {
+  const el = $("#during"), span = () => S.tl.span || 1;
+  el.addEventListener("click", e => {
+    const act = e.target.closest("[data-act]");
+    if (act) {
+      if (act.dataset.act === "clear") setWindow(null);
+      else if (LN.win) {
+        if (S.view !== "timeline") setView("timeline");
+        const a = LN.win.t0 / span(), b = LN.win.t1 / span(), pad = (b - a) * 0.05;
+        chart.animateTo(a - pad, b + pad);
+      }
+      return;
+    }
+    const chip = e.target.closest(".dchip"), r = e.target.closest(".drow[data-i]");
+    if (chip) {
+      e.stopPropagation();
+      const i = +chip.dataset.i, fn = +chip.dataset.fn;
+      if (i >= 0) { revealLane(i); switchThread(i, true); }
+      select(fn, 0, { reveal: false });
+      return;
+    }
+    if (r) { const i = +r.dataset.i; revealLane(i); switchThread(i, true); }
+  });
+  el.addEventListener("mouseover", e => {
+    const r = e.target.closest(".drow[data-i]"), c = e.target.closest(".dchip");
+    const i = r ? +r.dataset.i : -1;
+    if (i !== LN.hoverLane) { LN.hoverLane = i; chart.request(); }
+    setHover(c ? +c.dataset.fn : -1);
+  });
+  el.addEventListener("mouseleave", () => { LN.hoverLane = -1; setHover(-1); chart.request(); });
+}
+
 /* ═══════════════════════════ Phases ═══════════════════════════ */
 
 // Splits the run into consecutive stretches by "which part of your code is running", measured
@@ -1011,11 +1603,12 @@ function computePhases(level) {
 
 function phaseName(p) { return p.fn >= 0 ? FN[p.fn].disp : "(outside your code)"; }
 
-function drawPhaseBand(ctx, v) {
+function drawPhaseBand(ctx, v, xf) {
   const { phases } = computePhases(S.phaseLevel), y = AXIS;
   ctx.fillStyle = "#0e1117"; ctx.fillRect(v.left, y, v.W - v.left, BAND);
   for (const p of phases) {
-    const px = v.left + (p.x - v.x0) / v.span * v.pw, pw = p.w / v.span * v.pw;
+    const [x, w] = xf ? xf(p) : [p.x, p.w];
+    const px = v.left + (x - v.x0) / v.span * v.pw, pw = w / v.span * v.pw;
     const a = Math.max(px, v.left), b = Math.min(px + pw, v.W);
     if (b - a < 0.5) continue;
     ctx.fillStyle = p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR;
@@ -1029,10 +1622,13 @@ function drawPhaseBand(ctx, v) {
   ctx.fillStyle = "#20252f"; ctx.fillRect(v.left, y + BAND - 1, v.W - v.left, 1);
 }
 
-function phaseBandHit(px, py, v) {
+function phaseBandHit(px, py, v, xf) {
   if (py < AXIS) return null;
-  const { phases } = computePhases(S.phaseLevel), p = findAt(phases, v.pxToX(px));
-  return p ? { kind: "phase", key: p, phase: p, fn: p.fn, x: p.x, w: p.w } : null;
+  const { phases } = computePhases(S.phaseLevel), x = v.pxToX(px);
+  const p = xf ? phases.find(q => { const [a, w] = xf(q); return a <= x && x < a + w; }) : findAt(phases, x);
+  if (!p) return null;
+  const [a, w] = xf ? xf(p) : [p.x, p.w];
+  return { kind: "phase", key: p, phase: p, fn: p.fn, x: a, w };
 }
 
 function renderPhases() {
@@ -1047,15 +1643,16 @@ function renderPhases() {
     '<span class="stat">level ' + level + "</span>" +
     '<button class="chip" data-level="1"' + (level >= 8 ? " disabled" : "") + ">finer</button></div>";
   h += '<div class="prow phead"><span>#</span><span>Phase</span><span class="num">Start</span><span class="num">Duration</span><span class="num">Share</span><span>Timeline</span></div>';
+  const pos = S.tl && T.times ? phaseWall : p => [p.x, p.w], axTot = S.tl && T.times ? S.tl.span : tTot;
   phases.forEach((p, i) => {
-    const fo = FN[p.fn], path = p.fns.map(f => FN[f].disp).join(" › ");
+    const fo = FN[p.fn], path = p.fns.map(f => FN[f].disp).join(" › "), [px, pw] = pos(p);
     h += '<div class="prow' + (p.fn >= 0 && p.fn === S.selFn ? " sel" : "") + '" data-i="' + i + '" title="' + esc(path || "time spent outside your code (libraries, interpreter, startup)") + '">' +
       '<span class="loc">' + (i + 1) + "</span>" +
       '<span class="nm"><span class="dot" style="background:' + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></span>' + esc(phaseName(p)) +
       (fo && fo.rel ? '<span class="loc">' + esc(fo.rel) + "</span>" : "") + "</span>" +
-      '<span class="num loc">' + fmtAxis(p.x * tTot, 0.01) + "</span>" +
+      '<span class="num loc">' + fmtAxis(px * axTot, 0.01) + "</span>" +
       '<span class="num">' + fmtV(p.wt) + '</span><span class="num loc">' + fmtPct(p.wt) + "</span>" +
-      '<span class="gantt"><i style="left:' + (p.x * 100).toFixed(3) + "%;width:max(2px," + (p.w * 100).toFixed(3) + "%);background:" + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></i></span></div>';
+      '<span class="gantt"><i style="left:' + (px * 100).toFixed(3) + "%;width:max(2px," + (pw * 100).toFixed(3) + "%);background:" + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></i></span></div>';
   });
   el.innerHTML = h;
   if (S.tab === "phases") $("#tab-info").textContent = "click a phase to zoom the timeline";
@@ -1063,8 +1660,8 @@ function renderPhases() {
 
 function focusPhase(p) {
   if (S.view !== "timeline" && S.view !== "tasks") setView("timeline", false);
-  const pad = p.w * 0.02;
-  chart.animateTo(p.x - pad, p.x + p.w + pad);
+  const [x, w] = S.view === "timeline" && S.tl ? phaseWall(p) : [p.x, p.w], pad = w * 0.02;
+  chart.animateTo(x - pad, x + w + pad);
   if (p.fn >= 0) select(p.fn, 0, { reveal: false });
 }
 
@@ -1395,6 +1992,232 @@ function bindGraph() {
   });
 }
 
+/* ═══════════════════════════ Threads overview ═══════════════════════════ */
+
+const TH = { mode: null, list: null, expanded: new Set(), nodes: null };
+
+const isBootstrap = fo => fo.internal || !!fo.proc || fo.synth || BOOTSTRAP_FILE_RE.test(normPath(fo.file)) || (fo.name === "<module>" && fo.file === "<string>");
+const fmtT = v => (PROFILES?.[0]?.timed ? fmtDur(v) : Math.round(v) + " samples");
+
+// Per thread: entry point (first non-bootstrap frame) and hot functions
+// (deepest frame of your code below the entry, else the leaf of the filtered stack).
+function summarizeThreads() {
+  const key = S.frames + "|" + S.waiting;
+  if (TH.mode === key && TH.list) return TH.list;
+  const info = profileInfo(), profs = S.raw.profiles || [], mode = S.frames;
+  TH.list = info.map(pi => {
+    const p = profs[pi.i], samples = p.samples || [], weights = Array.isArray(p.weights) && p.weights.length === samples.length ? p.weights : null;
+    const skip = p.idle && S.waiting === "hide" ? p.idle : null;
+    const entries = new Map(), hot = new Map(), sEntry = new Int32Array(samples.length).fill(-1);
+    for (let s = 0; s < samples.length; s++) {
+      if (skip && skip[s]) continue;
+      const stk = samples[s] || [], ws = (weights ? +weights[s] || 0 : 1) * pi.scale;
+      for (const idx of stk) {
+        const fo = FN[frameFn[idx]];
+        if (fo && !isBootstrap(fo)) { sEntry[s] = fo.id; entries.set(fo.id, (entries.get(fo.id) || 0) + ws); break; }
+      }
+    }
+    const entry = maxKey(entries) ?? -1, fnA = [], lnA = [];
+    for (let s = 0; s < samples.length; s++) {
+      if (skip && skip[s]) continue;
+      const ws = (weights ? +weights[s] || 0 : 1) * pi.scale;
+      fnA.length = 0; lnA.length = 0;
+      filterStack(samples[s] || [], mode, fnA, lnA);
+      let from = sEntry[s] === entry ? fnA.indexOf(entry) : -1, pick = -1;
+      for (let k = fnA.length - 1; k > from; k--) if (FN[fnA[k]].cat === "user") { pick = fnA[k]; break; }
+      if (pick < 0 && fnA.length - 1 > from) pick = fnA[fnA.length - 1];
+      if (pick >= 0 && pick !== entry) hot.set(pick, (hot.get(pick) || 0) + ws);
+    }
+    return { pi, entry: entries.size ? entry : -1, entryW: entries.get(entry) || 0, hot };
+  });
+  TH.mode = key;
+  return TH.list;
+}
+
+// Thread nodes after merging pools and folding tiny threads; plus entry / hot nodes and edges.
+function threadsGraph() {
+  const list = summarizeThreads(), info = profileInfo(), grand = info.reduce((a, b) => a + b.secs, 0) || 1;
+  const procOrder = [];
+  const visit = pr => { procOrder.push(pr); for (const c of Array.from(PROCS.values()).filter(c => c.parent === pr.pid && c !== pr).sort((a, b) => b.total - a.total)) visit(c); };
+  for (const r of Array.from(PROCS.values()).filter(p => !p.parent || !PROCS.has(p.parent)).sort((a, b) => b.total - a.total)) visit(r);
+  const depth = pr => { let d = 0, p = pr; while (p.parent && PROCS.has(p.parent) && d < 8) { p = PROCS.get(p.parent); d++; } return d; };
+
+  const threads = [];
+  for (const pr of procOrder) {
+    const groups = new Map();
+    for (const i of pr.threads) {
+      const t = list[i], base = t.pi.name.replace(/[-_.\s]*\d+$/, "");
+      const key = base + "\u0000" + t.entry;
+      (groups.get(key) || groups.set(key, []).get(key)).push(t);
+    }
+    let nodes = [];
+    for (const members of groups.values()) {
+      members.sort((a, b) => b.pi.secs - a.pi.secs);
+      const one = members.length === 1, t0 = members[0], base = t0.pi.name.replace(/[-_.\s]*\d+$/, "");
+      const hot = new Map();
+      for (const m of members) for (const [f, w] of m.hot) hot.set(f, (hot.get(f) || 0) + w);
+      nodes.push({
+        kind: "thread", pid: pr.pid, members, hot, entry: t0.entry,
+        label: one ? t0.pi.label : (base ? base + "* ×" + members.length : "unnamed ×" + members.length),
+        total: members.reduce((a, m) => a + m.pi.secs, 0), entryW: members.reduce((a, m) => a + m.entryW, 0),
+      });
+    }
+    nodes.sort((a, b) => b.total - a.total);
+    const small = nodes.filter(n => n.total < grand * 0.005);
+    if (small.length > 1 && !TH.expanded.has(pr.pid)) {
+      nodes = nodes.filter(n => !small.includes(n));
+      nodes.push({ kind: "small", pid: pr.pid, members: small.flatMap(n => n.members), groups: small, hot: new Map(), entry: -1,
+        label: small.reduce((a, n) => a + n.members.length, 0) + " small threads", total: small.reduce((a, n) => a + n.total, 0), entryW: 0 });
+    }
+    threads.push(...nodes);
+  }
+  threads.forEach((n, k) => { n.id = "t" + k; n.tset = [n.id]; });
+
+  const entries = new Map(), hots = new Map(), edges = [];
+  const fnNode = (map, kind, fn) => map.get(fn) || map.set(fn, { kind, fn, id: kind[0] + fn, total: 0, tset: [], by: new Map() }).get(fn);
+  const multiProc = PROCS.size > 1;
+  const procNodes = multiProc ? procOrder.map(pr => ({ kind: "proc", pr, id: "p" + pr.pid, total: pr.total, depth: depth(pr), tset: threads.filter(t => t.pid === pr.pid).map(t => t.id), label: pr.short })) : [];
+  for (const t of threads) {
+    if (multiProc) edges.push({ from: "p" + t.pid, to: t.id, w: t.total, tset: [t.id] });
+    if (t.entry < 0) continue;
+    const e = fnNode(entries, "entry", t.entry);
+    e.total += t.entryW; e.tset.push(t.id); e.by.set(t, t.entryW);
+    edges.push({ from: t.id, to: e.id, w: t.entryW, tset: [t.id] });
+    const top = Array.from(t.hot).sort((a, b) => b[1] - a[1]);
+    const keep = top.filter(([, w], k) => k === 0 || w >= t.total * 0.02).slice(0, 4);
+    for (const [f, w] of keep) {
+      const h = fnNode(hots, "hot", f);
+      h.total += w; h.tset.push(t.id); h.by.set(t, w);
+      let ed = edges.find(x => x.from === e.id && x.to === h.id);
+      if (!ed) edges.push(ed = { from: e.id, to: h.id, w: 0, tset: [] });
+      ed.w += w; ed.tset.push(t.id);
+    }
+  }
+  return { grand, procNodes, threads, entries: Array.from(entries.values()), hots: Array.from(hots.values()), edges };
+}
+
+function renderThreads() {
+  const wrap = $("#threads-wrap"), svg = $("#threads");
+  if (S.view !== "threads" || !S.raw) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  const G = threadsGraph(), H = wrap.clientHeight || chart.H;
+  const cols = [G.procNodes, G.threads, G.entries, G.hots].filter((c, k) => k !== 0 || c.length);
+  const W = Math.max(wrap.clientWidth || chart.W, cols.length * 175);
+  const titles = (G.procNodes.length ? ["processes"] : []).concat(["threads", "entry points", "where time goes"]);
+  const NH = 40, GAP = 10, TOP = 44, colW = W / cols.length, NW = clamp(colW - 46, 110, 270);
+  const pos = new Map();
+  const place = (list, ci, key) => {
+    if (key) for (const n of list) {
+      let sw = 0, sy = 0;
+      for (const t of n.tset) { const p = pos.get(t); if (p) { const w = n.by?.get(G.threads.find(x => x.id === t)) || 1; sw += w; sy += p.y * w; } }
+      n.bary = sw ? sy / sw : 0;
+    }
+    if (key) list.sort((a, b) => a.bary - b.bary || b.total - a.total);
+    let y = TOP;
+    for (const n of list) { pos.set(n.id, { x: ci * colW + (colW - NW) / 2, y, n }); y += NH + GAP; }
+  };
+  cols.forEach((list, ci) => place(list, ci, ci >= cols.length - 2));
+  const contentH = Math.max(...cols.map(c => TOP + c.length * (NH + GAP))) + 20;
+  for (const col of cols) {   // center short columns vertically
+    const used = col.length * (NH + GAP) - GAP, off = Math.max(0, (Math.max(H, contentH) - TOP - 20 - used) / 2);
+    for (const n of col) pos.get(n.id).y += off;
+  }
+  const SH = Math.max(H, contentH);
+  svg.setAttribute("width", W); svg.setAttribute("height", SH); svg.setAttribute("viewBox", "0 0 " + W + " " + SH);
+
+  let h = titles.map((t, ci) => '<text class="g-col" x="' + (ci * colW + colW / 2) + '" y="22">' + t + "</text>").join("");
+  const maxE = Math.max(...G.edges.map(e => e.w), 1e-12);
+  for (const e of G.edges) {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    if (!a || !b) continue;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, dx = Math.max(30, (x2 - x1) / 2);
+    h += '<path class="gedge" data-t="' + e.tset.join(" ") + '" d="M' + x1 + "," + y1 + " C" + (x1 + dx) + "," + y1 + " " + (x2 - dx) + "," + y2 + " " + x2 + "," + y2 +
+      '" stroke-width="' + (1.2 + 9 * Math.sqrt(e.w / maxE)).toFixed(1) + '"/>';
+  }
+  const maxC = Math.floor((NW - 16) / 6.6), cut = (s, n = maxC) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+  const nodeSvg = (n, name, sub, cls, fill, text) => {
+    const { x, y } = pos.get(n.id), frac = n.total / G.grand;
+    return '<g class="gnode ' + cls + '" data-id="' + n.id + '" data-t="' + n.tset.join(" ") + '" transform="translate(' + x + "," + y + ')">' +
+      '<rect width="' + NW + '" height="' + NH + '" rx="7" fill="' + fill + '"/>' +
+      '<rect class="th-bar" x="6" y="' + (NH - 5) + '" height="2.5" rx="1" width="' + Math.max(1, (NW - 12) * frac).toFixed(1) + '"/>' +
+      '<text x="9" y="15" class="g-name"' + (text ? ' fill="' + text + '"' : "") + ">" + esc(cut(name)) + "</text>" +
+      '<text x="9" y="28" class="g-sub">' + esc(cut(sub, maxC + 6)) + "</text></g>";
+  };
+  for (const n of G.procNodes) h += nodeSvg(n, (n.depth ? "↳ ".repeat(Math.min(n.depth, 3)) : "") + n.label, "pid " + n.pr.pid + " · " + n.tset.length + " thread node" + (n.tset.length === 1 ? "" : "s") + " · " + fmtPct(n.total, G.grand), "th-proc", "#1d2740");
+  for (const n of G.threads) {
+    const sub = fmtT(n.total) + " · " + fmtPct(n.total, G.grand) + (n.kind === "small" ? " · click to expand" : n.members.length > 1 ? " · " + n.members.length + " threads" : "");
+    h += nodeSvg(n, n.label, sub, n.kind === "small" ? "th-thread th-small" : "th-thread", n.kind === "small" ? "#1a1f2b" : "#25304a");
+  }
+  for (const n of G.entries.concat(G.hots)) {
+    const fo = FN[n.fn], dim = S.match && !S.match[n.fn];
+    const sub = fmtT(n.total) + " · " + fmtPct(n.total, G.grand) + (n.tset.length > 1 ? " · " + n.tset.length + " threads" : "") + (fo.cat !== "user" ? " · " + CAT_LABEL[fo.cat] : "");
+    h += nodeSvg(n, fo.disp, sub, "th-fn" + (dim ? " dim" : ""), fo.color, fo.text);
+  }
+  svg.innerHTML = h;
+  TH.nodes = new Map([...G.procNodes, ...G.threads, ...G.entries, ...G.hots].map(n => [n.id, n]));
+  TH.grand = G.grand;
+}
+
+function highlightThreads(ids) {
+  const svg = $("#threads");
+  svg.classList.toggle("hovering", !!ids);
+  const set = new Set(ids || []);
+  for (const el of svg.querySelectorAll("[data-t]")) el.classList.toggle("hl", !!ids && el.dataset.t.split(" ").some(t => set.has(t)));
+}
+
+function switchThread(i, keepView) {
+  if (i == null || i === S.thread) return;
+  S.thread = i;
+  LN.layout = null;
+  syncPickers();
+  rebuildAll(true, keepView);
+}
+
+function threadTip(n) {
+  const G = TH.grand;
+  if (n.kind === "proc") {
+    return '<div class="t-name">' + esc(n.pr.short) + "</div>" + grid([["Process", "pid " + n.pr.pid + (n.pr.parent ? " · child of " + n.pr.parent : "")], ["Active", "<b>" + fmtT(n.total) + "</b> · " + fmtPct(n.total, G)], ["Threads", n.pr.threads.length]]) +
+      (n.pr.cmd ? '<div class="t-loc">' + esc(n.pr.cmd.length > 200 ? n.pr.cmd.slice(0, 199) + "…" : n.pr.cmd) + "</div>" : "") + '<div class="t-hint">Click to open its busiest thread</div>';
+  }
+  if (n.kind === "thread" || n.kind === "small") {
+    const rows = [["Active", "<b>" + fmtT(n.total) + "</b> · " + fmtPct(n.total, G)]];
+    if (PROCS.size > 1) rows.push(["Process", esc(PROCS.get(n.pid).short) + " (" + n.pid + ")"]);
+    if (n.entry >= 0) rows.push(["Entry point", esc(FN[n.entry].disp)]);
+    const top = Array.from(n.hot).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    for (const [f, w] of top) rows.push(["→ " + esc(cut40(FN[f].disp)), fmtT(w) + " · " + fmtPct(w, n.total)]);
+    const names = n.members.slice(0, 8).map(m => esc(m.pi.label) + ' <span class="t-dim">' + m.pi.tid + " · " + fmtT(m.pi.secs) + "</span>").join("<br>");
+    return '<div class="t-name">' + esc(n.label) + "</div>" + grid(rows) + (n.members.length > 1 ? '<div class="t-loc">' + names + (n.members.length > 8 ? "<br>…" : "") + "</div>" : "") +
+      '<div class="t-hint">' + (n.kind === "small" ? "Click to show these threads" : S.tl ? "Click to open it on the timeline" : "Click to open this thread in the flame graph") + "</div>";
+  }
+  const rows = [["Time", "<b>" + fmtT(n.total) + "</b> · " + fmtPct(n.total, G) + (n.kind === "entry" ? " (as entry point)" : " (deepest frame of your code)")]];
+  for (const [t, w] of Array.from(n.by).sort((a, b) => b[1] - a[1]).slice(0, 6)) rows.push([esc(cut40(t.label)), fmtT(w)]);
+  return fnHeader(n.fn) + grid(rows) + '<div class="t-hint">Click to switch to its busiest thread and view source</div>';
+}
+const cut40 = s => (s.length > 40 ? s.slice(0, 39) + "…" : s);
+
+function bindThreads() {
+  const svg = $("#threads");
+  let cur = null;
+  svg.addEventListener("mousemove", e => {
+    const g = e.target.closest(".gnode"), n = g && TH.nodes.get(g.dataset.id);
+    if (!n) { if (cur) { cur = null; hideTip(); highlightThreads(null); } return; }
+    if (n !== cur) { cur = n; highlightThreads(n.tset); showTip(threadTip(n), e); } else moveTip(e);
+  });
+  svg.addEventListener("mouseleave", () => { cur = null; hideTip(); highlightThreads(null); });
+  svg.addEventListener("click", e => {
+    const g = e.target.closest(".gnode"), n = g && TH.nodes.get(g.dataset.id);
+    if (!n) return;
+    hideTip(); cur = null;
+    if (n.kind === "small") { TH.expanded.add(n.pid); renderThreads(); return; }
+    const open = i => { switchThread(i); if (S.tl) revealLane(i); else setView("flame"); };
+    if (n.kind === "proc") { open(n.pr.threads.slice().sort((a, b) => PROFILES[b].secs - PROFILES[a].secs)[0]); return; }
+    if (n.kind === "thread") { open(n.members[0].pi.i); return; }
+    const best = Array.from(n.by).sort((a, b) => b[1] - a[1])[0];
+    if (best) switchThread(best[0].members[0].pi.i);
+    if (!FN[n.fn].synth) select(n.fn, 0);
+  });
+}
+
 /* ═══════════════════════════ Tooltip ═══════════════════════════ */
 
 const tipEl = $("#tip");
@@ -1422,6 +2245,7 @@ function fnHeader(fn, line) {
 function grid(rows) { return '<div class="t-grid">' + rows.map(([k, v]) => "<span>" + k + "</span><span>" + v + "</span>").join("") + "</div>"; }
 
 function tipFor(it) {
+  if (it.kind[0] === "l" && it.kind !== "lane") return laneTip(it);
   if (it.kind === "node") {
     const n = it.node;
     if (n.fn < 0) return '<div class="t-name">All samples</div>' + grid([["Thread", esc(T.name)], ["Total", "<b>" + fmtV(T.total) + "</b>"], ["Samples", T.n.toLocaleString()]]) +
@@ -1464,7 +2288,7 @@ function tipFor(it) {
     const p = it.phase, path = p.fns.map(f => esc(FN[f].disp)).join(" › ");
     return (p.fn >= 0 ? fnHeader(p.fn) : '<div class="t-name">(outside your code)</div>') + grid([
       ["Duration", "<b>" + fmtV(p.wt) + "</b> · " + fmtPct(p.wt)],
-      ["Starts at", fmtAxis(p.x * T.total * (T.timed ? T.scale : 1), 0.01)],
+      ["Starts at", fmtAxis(it.x * chart.axisTotal(), 0.01)],
     ].concat(path ? [["Path", path]] : [])) + '<div class="t-hint">Click to zoom to this phase · Phases tab lists them all</div>';
   }
   if (it.kind === "tm") {
@@ -1892,10 +2716,10 @@ function modelForView() {
   if (!T || !T.n) return null;
   switch (S.view) {
     case "inverted": return flameModel(true);
-    case "timeline": return timelineModel();
+    case "timeline": return S.tl ? lanesModel() : timelineModel();
     case "tasks": return tasksModel();
     case "map": return treemapModel();
-    case "graph": return null;
+    case "graph": case "threads": return null;
     default: return flameModel(false);
   }
 }
@@ -1904,17 +2728,33 @@ function setView(v, keep) {
   const prev = S.view;
   S.view = v; store.set("view", v);
   $$("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
-  $(".toolbar").classList.toggle("static-view", v === "map" || v === "graph");
+  $(".toolbar").classList.toggle("static-view", STATIC_VIEWS.has(v));
   const timeLike = x => x === "timeline" || x === "tasks";
   hideTip();
   chart.setModel(modelForView(), keep !== undefined ? keep : (timeLike(prev) && timeLike(v)));
   renderGraph();
+  renderThreads();
   updateChartInfo();
   if ((prev === "inverted") !== (v === "inverted")) refreshTree(true);
 }
 
 function updateChartInfo() {
   if (!T) return;
+  if (S.view === "threads") {
+    const info = profileInfo(), tot = info.reduce((a, b) => a + b.secs, 0);
+    $("#chart-info").innerHTML = (PROCS.size > 1 ? "<b>" + PROCS.size + "</b> processes · " : "") + "<b>" + info.length + "</b> threads · " + fmtT(tot) +
+      " active · " + (S.tl ? (S.waiting === "hide" ? "waiting excluded" : "waiting included") + " · click a thread to open it on the timeline"
+        : "times are sampled activity, not wall-clock (idle time isn't recorded) · click a thread to open it");
+    $("#plot-empty").hidden = true;
+    return;
+  }
+  if (S.view === "timeline" && S.tl) {
+    const info = profileInfo();
+    $("#chart-info").innerHTML = (PROCS.size > 1 ? "<b>" + PROCS.size + "</b> processes · " : "") + "<b>" + info.length + "</b> threads · " + fmtDur(S.tl.span) +
+      " wall clock · hatched = waiting · click a call to see what other threads did meanwhile · drag across the time axis to pick a window";
+    $("#plot-empty").hidden = true;
+    return;
+  }
   const parts = ["<b>" + esc(T.name) + "</b>", fmtV(T.total), T.n.toLocaleString() + " samples"];
   if (S.view === "timeline" || S.view === "tasks") {
     if (T.timed) parts.push("x-axis: sampled time (idle gaps removed)");
@@ -1987,40 +2827,68 @@ function setTab(tab) {
   if (tab === "tree") refreshTree(false);
   if (tab === "calls") renderCalls();
   if (tab === "phases") renderPhases();
+  if (tab === "during") renderDuring();
 }
 
-function rebuildAll(resetSel) {
+function rebuildAll(resetSel, keepView) {
   prepareThread();
   if (resetSel) S.selFn = -1;
   if (S.selFn >= 0 && !(T.tot[S.selFn] > 0)) S.selFn = -1;
   S.hoverFn = -1;
   SRC.thread = -1;
   TM.focus = null;
-  chart.setModel(modelForView(), false);
+  LN.layout = null;
+  chart.setModel(modelForView(), !!keepView);
   renderGraph();
+  renderThreads();
   updateChartInfo();
   refreshFunctions(false);
   refreshTree(true);
   renderCalls();
   renderPhases();
+  renderDuring();
   updateStatus();
   if (sourceOpen() && S.selFn >= 0) openSource(S.selFn, SRC.cur || 0);
 }
 
+const fmtAmt = pi => (pi.timed ? fmtDur(pi.secs) : pi.secs + " samples");
+
+// Process picker (only with several processes) and the thread picker for the chosen process.
+function syncPickers() {
+  const info = profileInfo(), pid = info[S.thread]?.pid, pr = PROCS.get(pid);
+  const psel = $("#process"), tsel = $("#thread");
+  if (PROCS.size > 1) psel.value = String(pid);
+  const order = (pr ? pr.threads : info.map(pi => pi.i)).slice().sort((a, b) => info[b].secs - info[a].secs);
+  tsel.innerHTML = order.map(i => '<option value="' + i + '">' + esc(info[i].label) + " — " + fmtAmt(info[i]) + "</option>").join("");
+  tsel.value = String(S.thread);
+}
+
 function initThreads() {
-  const sel = $("#thread"), profs = S.raw.profiles || [];
-  const sums = profs.map(p => (Array.isArray(p.weights) && p.weights.length ? p.weights.reduce((a, b) => a + (+b || 0), 0) : (p.samples || []).length));
-  const order = profs.map((_, i) => i).sort((a, b) => sums[b] - sums[a]);
-  sel.innerHTML = order.map(i => {
-    const p = profs[i], m = /"([^"]*)"/.exec(p.name || ""), tid = /Thread (\d+)/.exec(p.name || "");
-    const nm = (m && m[1]) || (tid ? "Thread " + tid[1] : p.name || "Thread " + i);
-    const scale = UNIT_SCALE[p.unit];
-    const amt = scale !== undefined ? fmtDur(sums[i] * scale) : sums[i] + " samples";
-    return '<option value="' + i + '">' + esc(nm) + " — " + amt + "</option>";
-  }).join("");
-  S.thread = order.length ? order[0] : 0;
-  sel.value = String(S.thread);
-  sel.addEventListener("change", () => { S.thread = +sel.value; rebuildAll(true); });
+  const info = profileInfo(), psel = $("#process"), tsel = $("#thread");
+  if (PROCS.size > 1) {
+    const procs = [], depth = new Map();
+    const visit = (pr, d) => {
+      procs.push(pr); depth.set(pr.pid, d);
+      for (const c of Array.from(PROCS.values()).filter(c => c.parent === pr.pid && c !== pr).sort((a, b) => b.total - a.total)) visit(c, d + 1);
+    };
+    for (const r of Array.from(PROCS.values()).filter(p => !p.parent || !PROCS.has(p.parent)).sort((a, b) => b.total - a.total)) visit(r, 0);
+    psel.innerHTML = procs.map(pr => {
+      const amt = info[0]?.timed ? fmtDur(pr.total) : pr.total + " samples";
+      const nm = pr.short.length > 40 ? pr.short.slice(0, 39) + "…" : pr.short;
+      return '<option value="' + pr.pid + '">' + "\u00a0\u00a0".repeat(Math.min(depth.get(pr.pid), 4)) + (depth.get(pr.pid) ? "↳ " : "") +
+        esc(nm) + " (" + pr.pid + ") — " + amt + "</option>";
+    }).join("");
+    $("#process-field").hidden = false;
+    psel.addEventListener("change", () => {
+      const pr = PROCS.get(+psel.value);
+      if (!pr || !pr.threads.length) return;
+      S.thread = pr.threads.slice().sort((a, b) => info[b].secs - info[a].secs)[0];
+      syncPickers(); rebuildAll(true);
+    });
+  }
+  S.thread = info.length ? info.map(pi => pi.i).sort((a, b) => info[b].secs - info[a].secs)[0] : 0;
+  syncPickers();
+  tsel.addEventListener("change", () => { S.thread = +tsel.value; rebuildAll(true); });
 }
 
 function bindUI() {
@@ -2030,10 +2898,11 @@ function bindUI() {
     setHover(it.fn);
     if (same) moveTip(e); else showTip(tipFor(it), e);
   };
-  chart.onResize = () => { if (S.view === "graph") renderGraph(); };
+  chart.onResize = () => { if (S.view === "graph") renderGraph(); if (S.view === "threads") renderThreads(); };
   chart.onClick = it => {
     if (!it) return;
     hideTip();
+    if (chart.model && chart.model.kind === "lanes" && laneClick(it)) return;
     if (it.kind === "node" && it.fn < 0) return;
     if (it.kind === "phase") { chart.zoomToItem(it); if (it.fn >= 0) select(it.fn, 0, { reveal: false }); return; }
     if (it.kind === "crumb") { setTreemapFocus(it.node); return; }
@@ -2054,8 +2923,9 @@ function bindUI() {
     if (z === "in") chart.zoomCenter(0.5); else if (z === "out") chart.zoomCenter(2); else chart.animateTo(0, 1);
   }));
 
-  const frames = $("#frames"), color = $("#color");
-  frames.value = S.frames; color.value = S.color;
+  const frames = $("#frames"), color = $("#color"), waiting = $("#waiting");
+  frames.value = S.frames; color.value = S.color; waiting.value = S.waiting;
+  waiting.addEventListener("change", () => { S.waiting = waiting.value; store.set("waiting", S.waiting); rebuildAll(false, true); renderThreads(); });
   frames.addEventListener("change", () => { S.frames = frames.value; store.set("frames", S.frames); rebuildAll(false); });
   color.addEventListener("change", () => {
     S.color = color.value; store.set("color", S.color);
@@ -2068,10 +2938,10 @@ function bindUI() {
   const search = $("#search");
   search.addEventListener("input", () => {
     clearTimeout(st);
-    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); }, 90);
+    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); }, 90);
   });
   search.addEventListener("keydown", e => {
-    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); search.blur(); e.stopPropagation(); }
+    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); renderThreads(); search.blur(); e.stopPropagation(); }
     if (e.key === "Enter") { const f = fnList.items[0]; if (f !== undefined) select(f, 0); }
   });
 
@@ -2180,6 +3050,8 @@ function bindUI() {
   $("#phases").addEventListener("mouseleave", () => setHover(-1));
 
   bindGraph();
+  bindThreads();
+  bindDuring();
   $("#btn-help").addEventListener("click", () => { $("#help").hidden = false; });
   $("#help").addEventListener("click", e => { if (e.target.id === "help" || e.target.closest("[data-close]")) $("#help").hidden = true; });
 
@@ -2230,6 +3102,7 @@ function bindKeys() {
       if ($("#call-menu")) { closeCallMenu(); return; }
       if (sourceOpen()) { setSourcePanel(false); return; }
       if (S.view === "map" && TM.focus && TM.focus.parent) { setTreemapFocus(TM.focus.parent); return; }
+      if (LN.win) { setWindow(null); return; }
       if (chart.span < 0.9999) { chart.animateTo(0, 1); return; }
       if (S.selFn >= 0) select(-1);
       return;
@@ -2239,10 +3112,10 @@ function bindKeys() {
     const k = e.key;
     if (k === "/") { e.preventDefault(); $("#search").focus(); $("#search").select(); return; }
     if (k === "?") { $("#help").hidden = !$("#help").hidden; return; }
-    if (k >= "1" && k <= "6") { setView(VIEWS[+k - 1]); return; }
+    if (k >= "1" && k <= String(VIEWS.length)) { setView(VIEWS[+k - 1]); return; }
     if (k === "s" || k === "S") { $("#btn-source").click(); return; }
     if (e.target.closest(".vlist")) return;
-    if (S.view === "map" || S.view === "graph") return;
+    if (STATIC_VIEWS.has(S.view)) return;
     if (k === "+" || k === "=") { chart.zoomCenter(0.5); return; }
     if (k === "-" || k === "_") { chart.zoomCenter(2); return; }
     if (k === "0") { chart.animateTo(0, 1); return; }
@@ -2273,6 +3146,14 @@ async function boot() {
   document.title = "codexplore · " + target;
 
   buildFunctions();
+  if (S.raw.codexplore?.timeline) {
+    let span = +S.raw.codexplore.span || 0;
+    if (!span) for (const p of S.raw.profiles || []) span = Math.max(span, +p.endValue || 0);
+    S.tl = { span: span || 1 };
+  }
+  $("#wait-field").hidden = !S.tl;
+  $("#tab-during").hidden = !S.tl;
+  if (!S.tl && S.tab === "during") S.tab = "functions";
   $("#app").hidden = false;
   $("#loading").hidden = true;
 

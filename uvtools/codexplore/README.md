@@ -30,6 +30,7 @@ This will:
 - `--python PATH` — Use a specific Python interpreter (default: current venv's python)
 - `--rate N` — Sampling rate in Hz (default: 100)
 - `--subprocesses` — Also profile child processes
+- `--cpu` — Record CPU samples only (no wall-clock timestamps); see [Recording modes](#recording-modes)
 
 ### Profile any command
 
@@ -46,6 +47,25 @@ The command must be a Python process (py-spy attaches to the Python interpreter 
 **Options:**
 - `--rate N` — Sampling rate in Hz (default: 100)
 - `--subprocesses` — Also profile child processes
+- `--cpu` — Record CPU samples only (no wall-clock timestamps)
+
+Options go after the subcommand: `codexplore exec --subprocesses -- cmd`.
+
+### Recording modes
+
+By default runs are recorded as a **wall-clock timeline**: every sample is timestamped, idle
+time is kept, and thread names are read from the live processes. That lets the UI line up
+all threads and processes on one clock, so you can see what a rollout worker was doing while
+the trainer sat in `queue.get()`.
+
+Time spent blocked (sleeping, waiting on a lock, queue, future, socket, `ray.get`, …) is
+detected from the call that was running and shown hatched. The **Waiting** picker decides
+whether it counts toward totals in the flame graph, tables and Threads view (hidden by
+default, so they show where CPU time goes). Detection is heuristic: a C extension that
+blocks without releasing a recognisable Python frame will look busy.
+
+`--cpu` records the older CPU-only format, where idle time is dropped. Use it for long runs
+where you only care about hot code.
 
 ### Analyze a run
 
@@ -55,16 +75,18 @@ codexplore analyze run_2025-01-15_143052
 
 Opens an interactive web UI at `http://127.0.0.1:8125` with:
 - **Flame graph / Bottom-up** — merged call tree (or its inverse), colored by module so your code stands out from libraries
-- **Timeline** — call stacks in chronological order, with an overview strip you can drag across to zoom into a time range
+- **Timeline** — for wall-clock runs, every thread of every process on one clock: one strip per thread (waiting hatched), grouped under its process. Click a thread's name to expand its full call stacks; click a process to fold it. For `--cpu` runs, the call stacks of the current thread in chronological order. Drag across the overview strip to zoom into a time range
+- **Meanwhile** — click any call on the timeline (or drag across the time axis) to see what every other thread and process did during that time: how long each was running vs. waiting, and the functions it was busy in. Click a thread or function to jump to it. This is how you follow work that hops threads, e.g. `trainer.step()` waiting on a future while a rollout process generates the data
 - **Tasks** — samples grouped by async task (or active function for sync code)
 - **Map** — treemap of where time is spent: your code / libraries / stdlib → package → file → function; click to drill down, Esc to go up
 - **Graph** — call graph centered on the selected function (two levels of callers and callees); click a node to recenter, click an edge to open the call site
+- **Threads** — every process and thread in one graph: each thread's entry point and the code it spends time in, so you can see what each thread does and which code they share. Thread pools (`worker_0`, `worker_1`, …) are merged; runs recorded with `--subprocesses` add a column with the process tree. Click a thread to open it
 - **Phases** — the run split into its top-level steps (e.g. setup → load data → train → save), shown as a band above the timeline and as a table; adjust granularity with coarser/finer
 - **Functions / Call tree / Callers & callees** — sortable tables; click through callers and callees to navigate the code
 - **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted; each line shows chips for the functions it calls, so you can follow the code by clicking, with back/forward history
 - **Frame filters** — hide import machinery, collapse library frames into one block, or show only your code
 
-Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`6` switch views, Alt + ←/→ go back/forward in the source viewer. Press `?` in the UI for all shortcuts.
+Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`7` switch views, Alt + ←/→ go back/forward in the source viewer. Press `?` in the UI for all shortcuts.
 
 **Options:**
 - `--port N` — Port for the web server (default: 8125)
@@ -105,8 +127,8 @@ Everything runs locally. The web UI is served from `127.0.0.1` with no external 
 
 ## How It Works
 
-1. **`codexplore run`** invokes `py-spy record --format speedscope` targeting your script with your venv's Python
-2. The speedscope JSON profile is saved alongside metadata in `codexplorer/<run_id>/`
+1. **`codexplore run`** invokes `py-spy record --format chrometrace --idle` (or `--format speedscope` with `--cpu`) targeting your script with your venv's Python, while polling `py-spy dump` for thread names
+2. The trace is converted to a speedscope-style JSON profile (with per-sample timestamps and waiting flags) and saved alongside metadata in `codexplorer/<run_id>/`
 3. **`codexplore analyze`** starts a local Starlette server that serves a self-contained web UI
 4. The web UI fetches the profile JSON and renders flame graphs + function tables via Canvas
 5. Clicking a function loads its source code from disk via a local API endpoint

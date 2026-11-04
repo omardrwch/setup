@@ -352,6 +352,17 @@ body.resizing.cols, body.resizing.cols * { cursor: col-resize !important; }
 .graph .g-name { font-size: 11.5px; font-weight: 600; pointer-events: none; }
 .graph .g-sub { font-size: 10px; fill: rgba(235, 240, 250, .7); pointer-events: none; }
 
+/* Threads overview */
+.threads-wrap { position: absolute; inset: 0; z-index: 1; overflow: auto; background: var(--bg); }
+.threads-wrap .graph { position: static; display: block; }
+.graph .th-bar { fill: rgba(255, 255, 255, .55); pointer-events: none; }
+.graph .th-proc rect:first-child { stroke: rgba(130, 160, 255, .45); }
+.graph .th-thread .g-name { fill: var(--text); }
+.graph .th-small rect:first-child { stroke: var(--line2); stroke-dasharray: 4 3; }
+.graph .th-small .g-name { fill: var(--text2); font-weight: 500; }
+.graph.threads.hovering .gnode:not(.hl) { opacity: .4; }
+.t-dim { color: var(--muted); }
+
 /* Phases */
 .phases-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .phases-head .title { font: 600 13px var(--mono); }
@@ -369,6 +380,42 @@ body.resizing.cols, body.resizing.cols * { cursor: col-resize !important; }
 .prow .nm .loc { margin-left: 8px; }
 .gantt { position: relative; height: 10px; background: rgba(255, 255, 255, .04); border-radius: 3px; overflow: hidden; }
 .gantt i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+
+/* Meanwhile: what other threads did during a call / window */
+.calls code { font: 11.5px var(--mono); color: var(--text2); background: rgba(255, 255, 255, .06); padding: 0 4px; border-radius: 3px; }
+.during-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.during-head .title { font: 13px var(--mono); }
+.during-head .title b { font-weight: 600; color: var(--text); }
+.during-head .stat { font: 11.5px var(--mono); color: var(--text2); }
+.during-own, .during-all, .during-idle { font: 12px var(--mono); color: var(--text2); margin: 0 0 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.during-own b { color: var(--text); font-weight: 600; }
+.during-note { color: #e3b46a; margin-left: 6px; font-family: var(--sans); }
+.during-all .lbl { font: 600 10.5px var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-right: 4px; }
+.during-idle { color: var(--muted); margin-top: 8px; }
+.drow {
+  display: grid; grid-template-columns: minmax(120px, 1.1fr) minmax(110px, 160px) 64px minmax(120px, 2fr);
+  gap: 10px; align-items: center; min-height: 26px; padding: 0 8px; border-radius: 5px; font: 12px var(--mono); cursor: pointer;
+}
+.drow:hover { background: var(--hover); }
+.drow.dhead { cursor: default; min-height: 22px; font: 600 10.5px var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.drow.dhead:hover, .drow.dproc:hover { background: none; }
+.drow.dproc { cursor: default; margin-top: 6px; color: var(--text2); border-top: 1px solid var(--line); border-radius: 0; }
+.drow.dproc .nm { color: var(--text); font-weight: 600; }
+.drow.dproc > :nth-child(2) { grid-column: 2 / -1; white-space: nowrap; }
+.drow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drow .nm .loc { margin-left: 8px; }
+.dbar { position: relative; height: 18px; display: flex; align-items: center; gap: 6px; padding-left: 6px; font-size: 11px; color: var(--text2); white-space: nowrap; }
+.dbar i { position: absolute; left: 0; top: 2px; bottom: 2px; background: rgba(130, 160, 255, .22); border-radius: 3px; z-index: 0; }
+.dbar b { position: relative; color: var(--text); font-weight: 600; }
+.dchips { display: flex; gap: 4px; overflow: hidden; min-width: 0; }
+.dchip { display: inline-flex; align-items: center; gap: 5px; color: var(--text2); background: rgba(255, 255, 255, .05); cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+.dchip .dot { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+.dchip em { font-style: normal; color: var(--muted); }
+.calls .placeholder.small { padding: 10px 8px; }
+@media (max-width: 760px) {
+  .drow { grid-template-columns: minmax(90px, 1fr) 110px minmax(80px, 1fr); }
+  .drow > :nth-child(3) { display: none; }
+}
 
 /* ─── Status bar ──────────────────────────────────────────── */
 .status {
@@ -389,6 +436,7 @@ body.resizing.cols, body.resizing.cols * { cursor: col-resize !important; }
   padding: 10px 12px; box-shadow: 0 10px 32px rgba(0, 0, 0, .5); font-size: 12px;
 }
 .tip .t-name { font: 600 12.5px var(--mono); color: var(--text); display: flex; align-items: center; word-break: break-all; }
+.tip .t-name .t-dim { margin-left: 8px; font-weight: 400; }
 .tip .t-loc { font: 11px var(--mono); color: var(--muted); margin-top: 3px; word-break: break-all; }
 .tip .t-grid { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin-top: 8px; font: 11.5px var(--mono); }
 .tip .t-grid span:nth-child(odd) { color: var(--muted); }
