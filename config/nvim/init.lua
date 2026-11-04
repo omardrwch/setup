@@ -78,6 +78,9 @@ vim.opt.swapfile = false
 -- Quick save
 vim.keymap.set("n", "<leader>w", ":w<CR>", { desc = "Save file" })
 
+-- Toggle markdown rendering
+vim.keymap.set("n", "<leader>mr", ":RenderMarkdown toggle<CR>", { desc = "Toggle markdown render" })
+
 -- ================================================================================
 -- Telescope utilities
 -- ================================================================================

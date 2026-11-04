@@ -36,7 +36,7 @@ if [ -d ~/.config/nvim ] || [ -L ~/.config/nvim ]; then
     mv ~/.config/nvim ~/.config/nvim.backup.$(date +%Y%m%d_%H%M%S)
 fi
 
-ln -sf ~/setup/nvim ~/.config/nvim
+ln -sf ~/setup/config/nvim ~/.config/nvim
 
 echo ""
 echo "✅ Installation complete!"

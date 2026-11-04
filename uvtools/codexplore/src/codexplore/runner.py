@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,54 @@ from codexplore.utils import (
     get_codexplorer_dir,
     get_run_dir,
 )
+
+_DUNDER_RE = re.compile(r"^__\w+__$")
+_CLASS_RE = re.compile(r"^(\s*)class\s+(\w+)")
+
+
+def _find_enclosing_class(filepath: str, line: int, cache: dict) -> str | None:
+    """Walk backwards from `line` to find the nearest enclosing class declaration."""
+    if filepath not in cache:
+        try:
+            cache[filepath] = Path(filepath).read_text(errors="replace").splitlines()
+        except OSError:
+            cache[filepath] = None
+    lines = cache[filepath]
+    if not lines or line <= 0 or line > len(lines):
+        return None
+    target_indent = len(lines[line - 1]) - len(lines[line - 1].lstrip())
+    for i in range(line - 2, -1, -1):
+        m = _CLASS_RE.match(lines[i])
+        if m and len(m.group(1)) < target_indent:
+            return m.group(2)
+    return None
+
+
+def _enrich_frame_names(profile_path: Path) -> None:
+    """Qualify bare dunder method names (e.g. __call__ -> MyClass.__call__).
+
+    py-spy uses co_qualname on Python 3.11+ which already includes the class,
+    but this handles older Pythons and edge cases (C extensions, etc.).
+    """
+    with open(profile_path) as f:
+        data = json.load(f)
+    frames = data.get("shared", {}).get("frames", [])
+    changed = False
+    file_cache: dict[str, list[str] | None] = {}
+    for frame in frames:
+        name = frame.get("name", "")
+        if not _DUNDER_RE.match(name) or "." in name:
+            continue
+        fp, line = frame.get("file", ""), frame.get("line", 0)
+        if not fp or line <= 0:
+            continue
+        cls = _find_enclosing_class(fp, line, file_cache)
+        if cls:
+            frame["name"] = f"{cls}.{name}"
+            changed = True
+    if changed:
+        with open(profile_path, "w") as f:
+            json.dump(data, f)
 
 
 def run_profile(
@@ -134,11 +183,12 @@ def run_profile(
     # Verify output was created
     if not profile_output.exists():
         print(f"Warning: Profile output not created at {profile_output}", file=sys.stderr)
-        # Still return the run_id since meta was saved
         meta["error"] = "Profile output not generated"
         with open(meta_file, "w") as f:
             json.dump(meta, f, indent=2)
         return None
+
+    _enrich_frame_names(profile_output)
 
     # Update meta with profile info
     try:
@@ -267,6 +317,8 @@ def exec_profile(
         with open(meta_file, "w") as f:
             json.dump(meta, f, indent=2)
         return None
+
+    _enrich_frame_names(profile_output)
 
     try:
         with open(profile_output) as f:

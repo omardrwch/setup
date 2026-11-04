@@ -49,7 +49,7 @@ uv tool install ipython
 
 ### Link Neovim config
 ```bash
-ln -sf ~/setup/nvim ~/.config/nvim
+ln -sf ~/setup/config/nvim ~/.config/nvim
 ```
 
 </details>
@@ -82,6 +82,26 @@ Then type `yazi` in the terminal.
 - **Statusline:** mini.statusline
 - **Colorscheme:** Tokyo Night
 
+## Neovim Treesitter Setup
+
+Neovim 0.12+ requires the `tree-sitter` CLI to compile parsers. Install it via Cargo (not npm):
+
+```bash
+cargo install tree-sitter-cli
+```
+
+On first launch, Neovim will install treesitter parsers automatically. If you're migrating from an older Neovim/nvim-treesitter setup, you may need to rebuild parsers:
+
+```vim
+:TSUninstall all
+```
+
+Then restart Neovim and run:
+
+```vim
+:TSUpdate
+```
+
 ## Troubleshooting
 
 **LSP not working:**
@@ -90,6 +110,10 @@ Then type `yazi` in the terminal.
 
 **Telescope live grep not working:**
 - Check ripgrep is installed: `which rg`
+
+**Treesitter errors (`attempt to call method 'range'`, etc):**
+- Make sure the `tree-sitter` CLI is installed: `which tree-sitter`
+- Run `:TSUninstall all`, restart Neovim, then `:TSUpdate`
 
 **uv tools not found:**
 - Restart your terminal
