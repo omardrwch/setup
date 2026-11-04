@@ -46,6 +46,8 @@
             <button data-view="inverted" title="Inverted tree: where time is actually spent (2)">Bottom-up</button>
             <button data-view="timeline" title="Call stacks in chronological order (3)">Timeline</button>
             <button data-view="tasks" title="Samples grouped by async task / active function (4)">Tasks</button>
+            <button data-view="map" title="Treemap of time by package, file and function (5)">Map</button>
+            <button data-view="graph" title="Callers and callees around the selected function (6)">Graph</button>
           </div>
           <div class="chart-info" id="chart-info"></div>
           <div class="grow"></div>
@@ -60,6 +62,7 @@
         <div class="minimap" id="minimap" hidden><canvas></canvas></div>
         <div class="plot" id="plot">
           <canvas></canvas>
+          <svg class="graph" id="graph" hidden></svg>
           <div class="hbar" hidden><div class="thumb"></div></div>
           <div class="vbar" hidden><div class="thumb"></div></div>
           <div class="empty" id="plot-empty" hidden></div>
@@ -73,6 +76,7 @@
           <button data-tab="functions">Functions</button>
           <button data-tab="tree">Call tree</button>
           <button data-tab="calls">Callers &amp; callees</button>
+          <button data-tab="phases">Phases</button>
           <div class="grow"></div>
           <span class="tab-info" id="tab-info"></span>
           <button class="icon-btn small" id="btn-collapse" title="Collapse / expand panel">▾</button>
@@ -95,6 +99,7 @@
           <div class="vlist" id="tree-list"></div>
         </div>
         <div class="tab-body" data-body="calls"><div class="calls" id="calls"></div></div>
+        <div class="tab-body" data-body="phases"><div class="calls" id="phases"></div></div>
       </div>
     </section>
 
@@ -102,6 +107,10 @@
 
     <aside class="side" id="side">
       <div class="side-head">
+        <div class="hist">
+          <button class="icon-btn small" id="src-back" title="Back (Alt+←)">←</button>
+          <button class="icon-btn small" id="src-fwd" title="Forward (Alt+→)">→</button>
+        </div>
         <div class="side-title">
           <div class="side-fn" id="src-fn">Source</div>
           <div class="side-path" id="src-path"></div>
@@ -140,12 +149,14 @@
       <div><kbd>Scroll</kbd><span>Scroll vertically through deep stacks</span></div>
       <div><kbd>Drag</kbd><span>Pan in any direction</span></div>
       <div><kbd>Drag overview</kbd><span>Select a time range to zoom into (Timeline / Tasks)</span></div>
-      <div><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd><span>Flame graph · Bottom-up · Timeline · Tasks</span></div>
+      <div><kbd>1</kbd> … <kbd>6</kbd><span>Flame graph · Bottom-up · Timeline · Tasks · Map · Graph</span></div>
+      <div><kbd>→ chips</kbd><span>In the source panel, click what a line calls to jump into it</span></div>
+      <div><kbd>Alt + ←</kbd> <kbd>Alt + →</kbd><span>Back / forward through visited code</span></div>
       <div><kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd><span>Zoom in · out · reset</span></div>
       <div><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd><span>Pan and scroll</span></div>
       <div><kbd>/</kbd><span>Search</span></div>
       <div><kbd>S</kbd><span>Toggle source panel</span></div>
-      <div><kbd>Esc</kbd><span>Close panel · reset zoom · clear selection</span></div>
+      <div><kbd>Esc</kbd><span>Close panel · go up in Map · reset zoom · clear selection</span></div>
     </div>
   </div>
 </div>

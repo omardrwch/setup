@@ -71,8 +71,11 @@ def serve_analysis(
 
     async def index(request: Request) -> HTMLResponse:
         """Serve the main HTML page."""
-        html_path = STATIC_DIR / "index.html"
-        return HTMLResponse(html_path.read_text(), headers=NO_CACHE)
+        html = (STATIC_DIR / "index.html").read_text()
+        for name in ("app.css", "app.js"):
+            version = int((STATIC_DIR / name).stat().st_mtime)
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={version}")
+        return HTMLResponse(html, headers=NO_CACHE)
 
     async def api_meta(request: Request) -> JSONResponse:
         """Return run metadata."""

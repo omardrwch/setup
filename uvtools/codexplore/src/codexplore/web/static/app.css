@@ -305,6 +305,71 @@ body.resizing.cols, body.resizing.cols * { cursor: col-resize !important; }
 .tk-bi { color: #7fdbca; }
 .tk-cls { color: #ffcb8b; }
 
+.hist { display: flex; gap: 4px; flex: none; }
+.icon-btn:disabled, .chip:disabled { opacity: .35; cursor: default; pointer-events: none; }
+
+/* Call chips: what a source line calls into */
+.l:has(.ccalls) { min-width: max-content; }
+.ccalls {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 10px 0 6px; flex: none;
+  position: sticky; right: 0; z-index: 1; background: linear-gradient(90deg, transparent, var(--bg) 14px);
+}
+.l.cur .ccalls { background: linear-gradient(90deg, transparent, #1d2844 14px); }
+.cchip {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: 8px;
+  font: 10.5px var(--mono); color: var(--text2); background: #141a28;
+  border: 1px solid rgba(130, 160, 255, .2); white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+}
+.cchip::before { content: "→"; color: var(--accent); margin-right: 4px; }
+.cchip.more::before { content: none; }
+.cchip .dot { width: 6px; height: 6px; margin-right: 5px; }
+.cchip em { font-style: normal; color: var(--muted); margin-left: 5px; }
+.cchip:hover { color: var(--text); background: #243154; border-color: rgba(130, 160, 255, .5); }
+.call-menu {
+  position: fixed; z-index: 45; width: min(560px, 90vw); max-height: 50vh; overflow: auto; padding: 6px;
+  background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; box-shadow: 0 12px 36px rgba(0, 0, 0, .5);
+}
+.call-menu-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); padding: 4px 8px 6px; }
+
+/* Map / Graph views have no time axis to zoom */
+.toolbar.static-view .zoom, .toolbar.static-view .hint { display: none; }
+
+/* Call graph */
+.graph { position: absolute; inset: 0; z-index: 1; background: var(--bg); font-family: var(--mono); }
+.graph .g-col { fill: var(--muted); font-size: 10.5px; text-anchor: middle; text-transform: uppercase; letter-spacing: .6px; font-family: var(--sans); }
+.graph .g-empty { fill: var(--muted); font-size: 12px; text-anchor: middle; font-family: var(--sans); }
+.graph .gedge { fill: none; stroke: rgba(130, 160, 255, .32); cursor: pointer; transition: stroke .12s, opacity .12s; }
+.graph .gedge.back { stroke-dasharray: 5 4; }
+.graph .gedge:hover, .graph .gedge.hl { stroke: rgba(150, 178, 255, .85); }
+.graph.hovering .gedge:not(.hl) { opacity: .35; }
+.graph .g-elabel { fill: var(--text2); font-size: 10px; text-anchor: middle; pointer-events: none; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.graph .gnode { cursor: pointer; }
+.graph .gnode rect { stroke: rgba(0, 0, 0, .35); stroke-width: 1; transition: filter .12s; }
+.graph .gnode:hover rect, .graph .gnode.hl rect { filter: brightness(1.25); }
+.graph .gnode.center rect { stroke: #fff; stroke-width: 2; }
+.graph .gnode.dim { opacity: .35; }
+.graph .g-name { font-size: 11.5px; font-weight: 600; pointer-events: none; }
+.graph .g-sub { font-size: 10px; fill: rgba(235, 240, 250, .7); pointer-events: none; }
+
+/* Phases */
+.phases-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.phases-head .title { font: 600 13px var(--mono); }
+.phases-head .loc b { color: var(--text2); font-weight: 500; }
+.phases-head .stat { font: 11.5px var(--mono); color: var(--text2); }
+.prow {
+  display: grid; grid-template-columns: 22px minmax(100px, 1.4fr) 64px 72px 48px minmax(60px, 1fr);
+  gap: 10px; align-items: center; height: 26px; padding: 0 8px; border-radius: 5px; font: 12px var(--mono); cursor: pointer;
+}
+.prow:hover { background: var(--hover); }
+.prow.sel { background: var(--sel); }
+.prow.phead { cursor: default; height: 22px; font: 600 10.5px var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.prow.phead:hover { background: none; }
+.prow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow .nm .loc { margin-left: 8px; }
+.gantt { position: relative; height: 10px; background: rgba(255, 255, 255, .04); border-radius: 3px; overflow: hidden; }
+.gantt i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+
 /* ─── Status bar ──────────────────────────────────────────── */
 .status {
   display: flex; align-items: center; gap: 16px; padding: 0 12px; background: var(--bg2);

@@ -57,11 +57,14 @@ Opens an interactive web UI at `http://127.0.0.1:8125` with:
 - **Flame graph / Bottom-up** — merged call tree (or its inverse), colored by module so your code stands out from libraries
 - **Timeline** — call stacks in chronological order, with an overview strip you can drag across to zoom into a time range
 - **Tasks** — samples grouped by async task (or active function for sync code)
+- **Map** — treemap of where time is spent: your code / libraries / stdlib → package → file → function; click to drill down, Esc to go up
+- **Graph** — call graph centered on the selected function (two levels of callers and callees); click a node to recenter, click an edge to open the call site
+- **Phases** — the run split into its top-level steps (e.g. setup → load data → train → save), shown as a band above the timeline and as a table; adjust granularity with coarser/finer
 - **Functions / Call tree / Callers & callees** — sortable tables; click through callers and callees to navigate the code
-- **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted
+- **Source viewer** — click any frame to see its source with per-line inclusive time and the enclosing function highlighted; each line shows chips for the functions it calls, so you can follow the code by clicking, with back/forward history
 - **Frame filters** — hide import machinery, collapse library frames into one block, or show only your code
 
-Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame. Press `?` in the UI for all shortcuts.
+Navigation: Ctrl/⌘ + scroll (or pinch) zooms, Shift + scroll pans, drag moves, double-click zooms to a frame, `1`–`6` switch views, Alt + ←/→ go back/forward in the source viewer. Press `?` in the UI for all shortcuts.
 
 **Options:**
 - `--port N` — Port for the web server (default: 8125)

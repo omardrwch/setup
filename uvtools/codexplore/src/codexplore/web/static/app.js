@@ -6,6 +6,7 @@
 const ROW = 18;          // flame / timeline row height (px)
 const LANE = 22;         // task lane height (px)
 const AXIS = 22;         // time axis height (px)
+const BAND = 16;         // phase band height under the time axis (px)
 const GUTTER = 220;      // task label gutter width (px)
 const LINE_H = 20;       // source line height (px), must match .l in CSS
 const FONT = '11px "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
@@ -112,8 +113,11 @@ const S = {
   search: "", match: null,
   selFn: -1, hoverFn: -1,
   sort: { key: "self", asc: false },
+  phaseLevel: clamp(+store.get("phaseLevel", 1) || 1, 1, 8),
 };
-if (!["flame", "inverted", "timeline", "tasks"].includes(S.view)) S.view = "flame";
+const VIEWS = ["flame", "inverted", "timeline", "tasks", "map", "graph"];
+if (!VIEWS.includes(S.view)) S.view = "flame";
+if (!["functions", "tree", "calls", "phases"].includes(S.tab)) S.tab = "functions";
 
 let FN = [];                 // function table: unique (name, file)
 let fnByKey = new Map();
@@ -247,7 +251,8 @@ function prepareThread() {
   }
 
   // Per-line heat on raw stacks (independent of the frame filter).
-  const lineStats = new Map(), fstamp = new Int32Array(frameFn.length).fill(-1);
+  // lineCallees: file → line → callee fn → weight (what each source line calls into).
+  const lineStats = new Map(), lineCallees = new Map(), fstamp = new Int32Array(frameFn.length).fill(-1);
   for (let s = 0; s < n; s++) {
     const stk = samples[s] || [], ws = w[s];
     for (let i = 0; i < stk.length; i++) {
@@ -261,7 +266,16 @@ function prepareThread() {
       let e = m.get(frameLine[idx]);
       if (!e) m.set(frameLine[idx], e = [0, 0]);
       e[1] += ws;
-      if (i === stk.length - 1) e[0] += ws;
+      if (i === stk.length - 1) { e[0] += ws; continue; }
+      let j = i + 1;
+      while (j < stk.length && FN[frameFn[stk[j]]].internal) j++;
+      if (j >= stk.length) continue;
+      let fc = lineCallees.get(fo.file);
+      if (!fc) lineCallees.set(fo.file, fc = new Map());
+      let lc = fc.get(frameLine[idx]);
+      if (!lc) fc.set(frameLine[idx], lc = new Map());
+      const callee = frameFn[stk[j]];
+      lc.set(callee, (lc.get(callee) || 0) + ws);
     }
   }
 
@@ -272,8 +286,8 @@ function prepareThread() {
   T = {
     index: S.thread, name: (tm && tm[1]) || (tid ? "Thread " + tid[1] : p.name || "Thread " + S.thread),
     timed: scale !== undefined, scale: scale || 1, n, w, starts, total, offs, sFn, sLine, maxDepth,
-    self, tot, fnLines, lineStats, heat, raw: samples,
-    tree: null, inv: null, timeline: null, tasks: null,
+    self, tot, fnLines, lineStats, lineCallees, heat, raw: samples,
+    tree: null, inv: null, timeline: null, tasks: null, treemap: null, edges: null, phases: new Map(),
   };
   updateSearchMatch();
 }
@@ -464,6 +478,7 @@ class Chart {
     this.sy = clamp(this.sy, 0, this.maxSy());
     this.miniCache = null;
     this.drawNow();
+    if (this.onResize) this.onResize();
   }
   resizeMini() {
     const r = this.miniWrap.getBoundingClientRect();
@@ -649,7 +664,7 @@ class Chart {
   hitAt(e) {
     if (!this.model || !T) return null;
     const r = this.plot.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
-    if (py < this.top) return null;
+    if (py < this.top) return this.model.hitHeader ? this.model.hitHeader(px, py, this) : null;
     return this.model.hit(px, py, this);
   }
 
@@ -659,6 +674,7 @@ class Chart {
     p.addEventListener("wheel", e => {
       if (!this.model) return;
       e.preventDefault();
+      if (this.model.static) return;
       const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.H : 1;
       let dx = e.deltaX * k, dy = e.deltaY * k;
       const mx = e.clientX - p.getBoundingClientRect().left;
@@ -675,9 +691,10 @@ class Chart {
       down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, drag: false };
     });
     p.addEventListener("pointermove", e => {
+      if (!this.model) return;
       this.mouse = { clientX: e.clientX, clientY: e.clientY };
       if (down) {
-        if (!down.drag && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
+        if (!down.drag && !this.model.static && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
           down.drag = true; this.dragging = true; p.classList.add("grabbing"); hideTip(); this.cancelAnim();
         }
         if (down.drag) {
@@ -697,10 +714,11 @@ class Chart {
     };
     p.addEventListener("pointerup", end);
     p.addEventListener("pointercancel", end);
-    p.addEventListener("pointerleave", e => { if (!down) { this.mouse = null; this.hover(null, e); } });
+    p.addEventListener("pointerleave", e => { if (!down && this.model) { this.mouse = null; this.hover(null, e); } });
     p.addEventListener("dblclick", e => {
-      if (e.target.closest(".hbar,.vbar")) return;
+      if (!this.model || e.target.closest(".hbar,.vbar")) return;
       const it = this.hitAt(e);
+      if (this.model.static) { if (this.model.dblclick) this.model.dblclick(it); return; }
       if (it && it.w > 0) this.zoomToItem(it); else this.animateTo(0, 1);
     });
   }
@@ -843,7 +861,8 @@ function drawMiniRows(rows, ctx, left, pw, H) {
 function timelineModel() {
   const { rows } = getTimeline();
   return {
-    kind: "timeline", gutter: 0, top: AXIS, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
+    kind: "timeline", gutter: 0, top: AXIS + BAND, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
+    hitHeader: phaseBandHit,
     height: () => rows.length * ROW + 6,
     drawMini: (ctx, left, pw, H) => drawMiniRows(rows, ctx, left, pw, H),
     draw(ctx, v) {
@@ -862,6 +881,7 @@ function timelineModel() {
         }
       }
       v.drawAxis(ctx);
+      drawPhaseBand(ctx, v);
     },
     hit(px, py, v) {
       const d = Math.floor((py - v.top + v.sy) / ROW), row = rows[d];
@@ -876,7 +896,8 @@ function timelineModel() {
 function tasksModel() {
   const tk = getTasks(), lanes = tk.lanes, tl = getTimeline();
   return {
-    kind: "tasks", gutter: GUTTER, top: AXIS, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
+    kind: "tasks", gutter: GUTTER, top: AXIS + BAND, minSpan: Math.max(1e-7, 0.5 / Math.max(1, T.n)),
+    hitHeader: phaseBandHit,
     height: () => lanes.length * LANE + 6,
     drawMini: (ctx, left, pw, H) => drawMiniRows(tl.rows, ctx, left, pw, H),
     draw(ctx, v) {
@@ -909,9 +930,11 @@ function tasksModel() {
         ctx.fillText(v.fit(fo ? fo.disp : "(no Python frames)", v.left - 44 - pctW), 26, y + LANE / 2);
       }
       v.drawAxis(ctx);
-      ctx.fillStyle = "#0e1117"; ctx.fillRect(0, 0, v.left, AXIS);
+      drawPhaseBand(ctx, v);
+      ctx.fillStyle = "#0e1117"; ctx.fillRect(0, 0, v.left, AXIS + BAND);
       ctx.fillStyle = "#687088"; ctx.fillText(lanes.length + " lanes · by share of time", 12, AXIS / 2);
-      ctx.fillStyle = "#20252f"; ctx.fillRect(0, AXIS - 1, v.left, 1); ctx.fillRect(v.left - 1, 0, 1, AXIS);
+      ctx.fillText("phases", 12, AXIS + BAND / 2);
+      ctx.fillStyle = "#20252f"; ctx.fillRect(0, AXIS - 1, v.left, 1); ctx.fillRect(0, AXIS + BAND - 1, v.left, 1); ctx.fillRect(v.left - 1, 0, 1, AXIS + BAND);
     },
     hit(px, py, v) {
       const li = Math.floor((py - v.top + v.sy) / LANE), lane = lanes[li];
@@ -923,6 +946,453 @@ function tasksModel() {
       return { kind: "tsample", key: "s" + s, lane, s, run: r, fn: tk.leafFn[s], line: tk.leafLine[s], x: r.x, w: r.w, y: li * LANE, h: LANE };
     },
   };
+}
+
+/* ═══════════════════════════ Phases ═══════════════════════════ */
+
+// Splits the run into consecutive stretches by "which part of your code is running", measured
+// below the user frames that nearly every sample shares (e.g. the test function).
+function computePhases(level) {
+  const cached = T.phases.get(level);
+  if (cached) return cached;
+  const { n, w, offs, sFn, starts, total } = T, tv = total || 1;
+  const lists = new Array(n);
+  let userW = 0;
+  for (let s = 0; s < n; s++) {
+    const arr = [];
+    for (let k = offs[s]; k < offs[s + 1]; k++) {
+      const f = sFn[k];
+      if (FN[f].cat === "user" && arr[arr.length - 1] !== f) arr.push(f);
+    }
+    lists[s] = arr;
+    if (arr.length) userW += w[s];
+  }
+  const prefix = [];
+  let cand = [];
+  for (let s = 0; s < n; s++) if (lists[s].length) cand.push(s);
+  while (cand.length) {
+    const d = prefix.length, cnt = new Map();
+    for (const s of cand) if (lists[s].length > d + 1) cnt.set(lists[s][d], (cnt.get(lists[s][d]) || 0) + w[s]);
+    let best = -1, bw = 0;
+    for (const [f, x] of cnt) if (x > bw) { bw = x; best = f; }
+    if (best < 0 || bw < 0.9 * userW) break;
+    prefix.push(best);
+    cand = cand.filter(s => lists[s][d] === best);
+  }
+  const keyOf = s => {
+    const l = lists[s];
+    if (!l.length) return null;
+    let base = prefix.length;
+    for (let i = 0; i < prefix.length; i++) if (l[i] !== prefix[i]) { base = 0; break; }
+    const seg = l.slice(base, base + level);
+    return seg.length ? seg : [l[l.length - 1]];
+  };
+  const runs = [];
+  for (let s = 0; s < n; s++) {
+    const seg = keyOf(s), key = seg ? seg.join(",") : "~", last = runs[runs.length - 1];
+    if (last && last.key === key) { last.s1 = s + 1; last.wt += w[s]; }
+    else runs.push({ key, fns: seg || [], s0: s, s1: s + 1, wt: w[s] });
+  }
+  const minW = tv * 0.01, out = [];
+  for (const r of runs) {
+    const last = out[out.length - 1];
+    if (last && (r.wt < minW || last.key === r.key)) { last.s1 = r.s1; last.wt += r.wt; continue; }
+    out.push({ ...r });
+  }
+  if (out.length > 1 && out[0].wt < minW) { out[1].s0 = out[0].s0; out[1].wt += out[0].wt; out.shift(); }
+  for (const p of out) {
+    p.x = starts[p.s0] / tv; p.w = (starts[p.s1] - starts[p.s0]) / tv;
+    p.fn = p.fns.length ? p.fns[p.fns.length - 1] : -1;
+  }
+  const res = { prefix, phases: out, level };
+  T.phases.set(level, res);
+  return res;
+}
+
+function phaseName(p) { return p.fn >= 0 ? FN[p.fn].disp : "(outside your code)"; }
+
+function drawPhaseBand(ctx, v) {
+  const { phases } = computePhases(S.phaseLevel), y = AXIS;
+  ctx.fillStyle = "#0e1117"; ctx.fillRect(v.left, y, v.W - v.left, BAND);
+  for (const p of phases) {
+    const px = v.left + (p.x - v.x0) / v.span * v.pw, pw = p.w / v.span * v.pw;
+    const a = Math.max(px, v.left), b = Math.min(px + pw, v.W);
+    if (b - a < 0.5) continue;
+    ctx.fillStyle = p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR;
+    ctx.fillRect(a, y + 2, Math.max(1, b - a - 1), BAND - 4);
+    if (p.fn >= 0 && p.fn === S.hoverFn) { ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.fillRect(a, y + 2, Math.max(1, b - a - 1), BAND - 4); }
+    if (b - a > 30) {
+      const t = v.fit(phaseName(p), b - a - 8);
+      if (t) { ctx.fillStyle = p.fn >= 0 && S.color !== "heat" ? FN[p.fn].text : "rgba(230,234,244,.9)"; ctx.fillText(t, a + 4, y + BAND / 2); }
+    }
+  }
+  ctx.fillStyle = "#20252f"; ctx.fillRect(v.left, y + BAND - 1, v.W - v.left, 1);
+}
+
+function phaseBandHit(px, py, v) {
+  if (py < AXIS) return null;
+  const { phases } = computePhases(S.phaseLevel), p = findAt(phases, v.pxToX(px));
+  return p ? { kind: "phase", key: p, phase: p, fn: p.fn, x: p.x, w: p.w } : null;
+}
+
+function renderPhases() {
+  const el = $("#phases");
+  if (!T || !T.n) { el.innerHTML = '<div class="placeholder">No samples.</div>'; return; }
+  const { prefix, phases, level } = computePhases(S.phaseLevel);
+  const tTot = T.timed ? T.total * T.scale : T.total;
+  const ctx = prefix.length ? "inside " + prefix.map(f => "<b>" + esc(FN[f].disp) + "</b>").join(" › ") : "top-level calls into your code";
+  let h = '<div class="phases-head"><span class="title">' + phases.length + " phases</span>" +
+    '<span class="loc">' + ctx + '</span><span class="grow"></span>' +
+    '<button class="chip" data-level="-1"' + (level <= 1 ? " disabled" : "") + ">coarser</button>" +
+    '<span class="stat">level ' + level + "</span>" +
+    '<button class="chip" data-level="1"' + (level >= 8 ? " disabled" : "") + ">finer</button></div>";
+  h += '<div class="prow phead"><span>#</span><span>Phase</span><span class="num">Start</span><span class="num">Duration</span><span class="num">Share</span><span>Timeline</span></div>';
+  phases.forEach((p, i) => {
+    const fo = FN[p.fn], path = p.fns.map(f => FN[f].disp).join(" › ");
+    h += '<div class="prow' + (p.fn >= 0 && p.fn === S.selFn ? " sel" : "") + '" data-i="' + i + '" title="' + esc(path || "time spent outside your code (libraries, interpreter, startup)") + '">' +
+      '<span class="loc">' + (i + 1) + "</span>" +
+      '<span class="nm"><span class="dot" style="background:' + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></span>' + esc(phaseName(p)) +
+      (fo && fo.rel ? '<span class="loc">' + esc(fo.rel) + "</span>" : "") + "</span>" +
+      '<span class="num loc">' + fmtAxis(p.x * tTot, 0.01) + "</span>" +
+      '<span class="num">' + fmtV(p.wt) + '</span><span class="num loc">' + fmtPct(p.wt) + "</span>" +
+      '<span class="gantt"><i style="left:' + (p.x * 100).toFixed(3) + "%;width:max(2px," + (p.w * 100).toFixed(3) + "%);background:" + (p.fn >= 0 ? fillFor(p.fn) : INTERNAL_COLOR) + '"></i></span></div>';
+  });
+  el.innerHTML = h;
+  if (S.tab === "phases") $("#tab-info").textContent = "click a phase to zoom the timeline";
+}
+
+function focusPhase(p) {
+  if (S.view !== "timeline" && S.view !== "tasks") setView("timeline", false);
+  const pad = p.w * 0.02;
+  chart.animateTo(p.x - pad, p.x + p.w + pad);
+  if (p.fn >= 0) select(p.fn, 0, { reveal: false });
+}
+
+/* ═══════════════════════════ Codebase map ═══════════════════════════ */
+
+const TM = { focus: null, rects: null, key: "", crumbs: [] };
+const CAT_TITLE = { user: "Your code", lib: "Libraries", std: "Standard library", internal: "Interpreter / other" };
+const TM_TOP = 26;
+
+function buildTreemap() {
+  const root = { name: "All code", kind: "root", value: 0, count: 0, kids: new Map(), parent: null };
+  const child = (node, key, name, kind) => {
+    let c = node.kids.get(key);
+    if (!c) { c = { name, kind, value: 0, count: 0, kids: new Map(), parent: node }; node.kids.set(key, c); }
+    return c;
+  };
+  for (let f = 0; f < FN.length; f++) {
+    const v = T.self[f];
+    if (!(v > 0)) continue;
+    const fo = FN[f];
+    let node = child(root, fo.cat, CAT_TITLE[fo.cat], "cat");
+    const segs = (fo.rel || "").split("/").filter(s => s && s !== "…");
+    for (let i = 0; i < segs.length - 1; i++) node = child(node, segs[i], segs[i], "dir");
+    if (segs.length) { node = child(node, segs[segs.length - 1], segs[segs.length - 1], "file"); node.file = fo.file; }
+    const leaf = child(node, "\u0000" + f, fo.disp, "fn");
+    leaf.fn = f;
+    for (let x = leaf; x; x = x.parent) { x.value += v; x.count++; }
+  }
+  const fin = n => {
+    n.kids = Array.from(n.kids.values()).sort((a, b) => b.value - a.value);
+    n.kids.forEach(fin);
+    while (n.kind === "dir" && n.kids.length === 1 && n.kids[0].kind === "dir") {
+      const c = n.kids[0];
+      n.name += "/" + c.name; n.kids = c.kids; n.kids.forEach(k => { k.parent = n; });
+    }
+  };
+  fin(root);
+  return root;
+}
+const getTreemap = () => T.treemap || (T.treemap = buildTreemap());
+
+function squarify(items, x, y, w, h) {
+  const out = [], total = items.reduce((a, b) => a + b.value, 0);
+  if (!(total > 0) || w <= 0 || h <= 0) return out;
+  const scale = (w * h) / total;
+  let i = 0;
+  while (i < items.length && w > 0.5 && h > 0.5) {
+    const side = Math.min(w, h), mx = items[i].value * scale;
+    let j = i, sum = 0, best = Infinity;
+    while (j < items.length) {
+      const a = items[j].value * scale, s = sum + a;
+      const r = Math.max(side * side * mx / (s * s), (s * s) / (side * side * a));
+      if (r > best) break;
+      best = r; sum = s; j++;
+    }
+    if (w >= h) {
+      const cw = sum / h; let cy = y;
+      for (let k = i; k < j; k++) { const ch = items[k].value * scale / cw; out.push([items[k], x, cy, cw, ch]); cy += ch; }
+      x += cw; w -= cw;
+    } else {
+      const rh = sum / w; let cx = x;
+      for (let k = i; k < j; k++) { const cw = items[k].value * scale / rh; out.push([items[k], cx, y, cw, rh]); cx += cw; }
+      y += rh; h -= rh;
+    }
+    i = j;
+  }
+  return out;
+}
+
+function layoutTreemap(v) {
+  const root = getTreemap();
+  if (!TM.focus || TM.root !== root) { TM.focus = root; TM.root = root; }
+  const key = v.W + "x" + v.H + ":" + TM.focus.name + TM.focus.value;
+  if (TM.key === key && TM.rects) return;
+  const rects = [];
+  const place = (n, x, y, w, h, depth) => {
+    rects.push({ n, x, y, w, h, depth });
+    if (n.kind === "fn" || !n.kids.length) return;
+    const head = w >= 50 && h >= 32 ? 17 : 0, pad = 2;
+    const ix = x + pad, iy = y + (head || pad), iw = w - 2 * pad, ih = h - (head || pad) - pad;
+    if (iw < 3 || ih < 3) return;
+    for (const [c, cx, cy, cw, ch] of squarify(n.kids, ix, iy, iw, ih)) place(c, cx, cy, cw, ch, depth + 1);
+  };
+  for (const [c, cx, cy, cw, ch] of squarify(TM.focus.kids, 4, TM_TOP + 2, v.W - 8, v.H - TM_TOP - 6)) place(c, cx, cy, cw, ch, 0);
+  TM.rects = rects; TM.key = key;
+}
+
+function tmPath(n) {
+  const parts = [];
+  for (let x = n; x && x.kind !== "root"; x = x.parent) parts.unshift(x.name);
+  return parts;
+}
+
+function setTreemapFocus(n) {
+  TM.focus = n && n.kind !== "fn" ? n : TM.focus;
+  TM.key = "";
+  chart.request();
+  updateChartInfo();
+}
+
+function treemapModel() {
+  const BG = ["#151922", "#1a1f2b", "#1f2532"];
+  return {
+    kind: "map", static: true, gutter: 0, top: TM_TOP, minSpan: 1, drawMini: null,
+    height: () => 0,
+    draw(ctx, v) {
+      layoutTreemap(v);
+      // Breadcrumb
+      ctx.fillStyle = "#0e1117"; ctx.fillRect(0, 0, v.W, TM_TOP);
+      ctx.fillStyle = "#20252f"; ctx.fillRect(0, TM_TOP - 1, v.W, 1);
+      const chain = [];
+      for (let x = TM.focus; x; x = x.parent) chain.unshift(x);
+      let cx = 10;
+      TM.crumbs = [];
+      chain.forEach((n, i) => {
+        const label = n.name + (i === chain.length - 1 ? "  " + fmtV(n.value) + " self time" : "");
+        const wpx = label.length * v.charW;
+        ctx.fillStyle = i === chain.length - 1 ? "#e4e7ef" : "#82a0ff";
+        ctx.fillText(label, cx, TM_TOP / 2);
+        TM.crumbs.push({ n, x0: cx - 4, x1: cx + wpx + 4 });
+        cx += wpx;
+        if (i < chain.length - 1) { ctx.fillStyle = "#687088"; ctx.fillText("  ›  ", cx, TM_TOP / 2); cx += 5 * v.charW; }
+      });
+      for (const r of TM.rects) {
+        const n = r.n;
+        if (r.w < 1 || r.h < 1) continue;
+        if (n.kind === "fn") {
+          ctx.fillStyle = fillFor(n.fn);
+          ctx.fillRect(r.x + .5, r.y + .5, Math.max(1, r.w - 1), Math.max(1, r.h - 1));
+          if (n.fn === S.hoverFn) { ctx.fillStyle = "rgba(255,255,255,.17)"; ctx.fillRect(r.x + .5, r.y + .5, r.w - 1, r.h - 1); }
+          if (n.fn === S.selFn && r.w > 3 && r.h > 3) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.strokeRect(r.x + 1.25, r.y + 1.25, r.w - 2.5, r.h - 2.5); }
+          if (r.w > 34 && r.h > 13 && !(S.match && !S.match[n.fn])) {
+            ctx.fillStyle = S.color === "heat" ? "rgba(255,255,255,.95)" : FN[n.fn].text;
+            const t = v.fit(n.name, r.w - 8);
+            if (t) ctx.fillText(t, r.x + 4, r.y + Math.min(r.h / 2, 10));
+            if (r.h > 28) {
+              ctx.globalAlpha = .7;
+              const t2 = v.fit(fmtV(n.value) + " · " + fmtPct(n.value), r.w - 8);
+              if (t2) ctx.fillText(t2, r.x + 4, r.y + 23);
+              ctx.globalAlpha = 1;
+            }
+          }
+        } else {
+          ctx.fillStyle = BG[r.depth % 3];
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+          ctx.strokeStyle = n.kind === "cat" ? "#3a4258" : "#2a3040"; ctx.lineWidth = 1;
+          ctx.strokeRect(r.x + .5, r.y + .5, r.w - 1, r.h - 1);
+          if (r.w >= 50 && r.h >= 32) {
+            const t = v.fit((n.kind === "dir" ? n.name + "/" : n.name) + "  " + fmtPct(n.value), r.w - 10);
+            ctx.fillStyle = n.kind === "cat" ? "#e4e7ef" : n.kind === "file" ? "#c9cfdc" : "#a0a8bb";
+            if (t) ctx.fillText(t, r.x + 5, r.y + 9);
+          }
+        }
+      }
+    },
+    hit(px, py) {
+      const rs = TM.rects || [];
+      for (let i = rs.length - 1; i >= 0; i--) {
+        const r = rs[i];
+        if (px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+          return { kind: "tm", key: r.n, node: r.n, fn: r.n.kind === "fn" ? r.n.fn : -1 };
+      }
+      return null;
+    },
+    hitHeader(px) {
+      const c = TM.crumbs.find(c => px >= c.x0 && px <= c.x1);
+      return c && c.n !== TM.focus ? { kind: "crumb", key: c.n, node: c.n, fn: -1 } : null;
+    },
+    dblclick(it) {
+      if (it && it.kind === "tm" && it.node.kind === "fn" && it.node.parent) setTreemapFocus(it.node.parent);
+    },
+  };
+}
+
+/* ═══════════════════════════ Call graph ═══════════════════════════ */
+
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function getEdges() {
+  if (T.edges) return T.edges;
+  const { n, w, offs, sFn, sLine } = T, em = new Map();
+  for (let s = 0; s < n; s++) {
+    const a = offs[s], b = offs[s + 1], ws = w[s];
+    let seen = null;
+    for (let k = a + 1; k < b; k++) {
+      const c = sFn[k - 1], e = sFn[k];
+      if (c === e) continue;
+      const kk = c * 1048576 + e;
+      if (seen && seen.has(kk)) continue;
+      (seen || (seen = new Set())).add(kk);
+      let ed = em.get(kk);
+      if (!ed) em.set(kk, ed = { from: c, to: e, w: 0, lines: new Map() });
+      ed.w += ws;
+      const ln = sLine[k - 1];
+      if (ln > 0) ed.lines.set(ln, (ed.lines.get(ln) || 0) + ws);
+    }
+  }
+  const out = new Map(), inn = new Map();
+  for (const ed of em.values()) {
+    (out.get(ed.from) || out.set(ed.from, []).get(ed.from)).push(ed);
+    (inn.get(ed.to) || inn.set(ed.to, []).get(ed.to)).push(ed);
+  }
+  for (const l of out.values()) l.sort((a, b) => b.w - a.w);
+  for (const l of inn.values()) l.sort((a, b) => b.w - a.w);
+  return (T.edges = { out, inn });
+}
+
+function graphCenter() {
+  if (S.selFn >= 0 && T.tot[S.selFn] > 0) return S.selFn;
+  let best = -1;
+  for (let f = 0; f < FN.length; f++) if (FN[f].cat === "user" && T.tot[f] > 0 && (best < 0 || T.tot[f] > T.tot[best])) best = f;
+  if (best < 0) for (let f = 0; f < FN.length; f++) if (T.tot[f] > 0 && !FN[f].synth && (best < 0 || T.tot[f] > T.tot[best])) best = f;
+  return best;
+}
+
+function computeEgoGraph(center, maxPerCol, depth = 2) {
+  const { out, inn } = getEdges(), minW = T.total * 0.002;
+  const nodes = new Map([[center, { fn: center, col: 0, w: T.tot[center] }]]), edges = new Set();
+  for (const side of [-1, 1]) {
+    let frontier = [center];
+    for (let d = 1; d <= depth; d++) {
+      const next = new Map(), k = d === 1 ? 9 : 4;
+      for (const f of frontier) {
+        let taken = 0;
+        for (const ed of (side < 0 ? inn.get(f) : out.get(f)) || []) {
+          if (taken >= k || ed.w < minW) break;
+          const other = side < 0 ? ed.from : ed.to;
+          edges.add(ed); taken++;
+          if (!nodes.has(other)) next.set(other, (next.get(other) || 0) + ed.w);
+        }
+      }
+      const placed = Array.from(next).sort((a, b) => b[1] - a[1]).slice(0, maxPerCol);
+      for (const [f, wt] of placed) nodes.set(f, { fn: f, col: side * d, w: wt });
+      frontier = placed.map(p => p[0]);
+    }
+  }
+  const es = Array.from(edges).filter(e => nodes.has(e.from) && nodes.has(e.to));
+  return { nodes: Array.from(nodes.values()), edges: es };
+}
+
+function renderGraph() {
+  const svg = $("#graph");
+  if (S.view !== "graph" || !T) { svg.setAttribute("hidden", ""); return; }
+  svg.removeAttribute("hidden");
+  const W = chart.W, H = chart.H;
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  const center = graphCenter();
+  if (center < 0) { svg.innerHTML = '<text x="' + W / 2 + '" y="' + H / 2 + '" class="g-empty">No samples.</text>'; return; }
+  const NH = 38, GAP = 12, maxPerCol = Math.max(3, Math.floor((H - 60) / (NH + GAP)));
+  const { nodes, edges } = computeEgoGraph(center, maxPerCol, W < 5 * 170 ? 1 : 2);
+  const cols = Array.from(new Set(nodes.map(n => n.col))).sort((a, b) => a - b);
+  const colW = W / cols.length, NW = Math.max(90, Math.min(250, colW - 50));
+  const pos = new Map();
+  for (const [ci, c] of cols.entries()) {
+    const list = nodes.filter(n => n.col === c).sort((a, b) => b.w - a.w);
+    const total = list.length * NH + (list.length - 1) * GAP;
+    let y = Math.max(44, (H - total) / 2);
+    const x = ci * colW + (colW - NW) / 2;
+    for (const n of list) { pos.set(n.fn, { x, y, n }); y += NH + GAP; }
+  }
+  const maxE = Math.max(...edges.map(e => e.w), 1e-12);
+  let h = "";
+  for (const [ci, c] of cols.entries()) {
+    const label = c === 0 ? "selected" : c < 0 ? (c === -1 ? "called by" : "called by (2 levels up)") : (c === 1 ? "calls" : "calls (2 levels down)");
+    h += '<text class="g-col" x="' + (ci * colW + colW / 2) + '" y="22">' + label + "</text>";
+  }
+  for (const e of edges) {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    const back = a.x >= b.x;
+    const x1 = back ? a.x : a.x + NW, y1 = a.y + NH / 2, x2 = back ? b.x + NW : b.x, y2 = b.y + NH / 2;
+    const dx = Math.max(40, Math.abs(x2 - x1) / 2) * (back ? -1 : 1);
+    const sw = (1.2 + 9 * Math.sqrt(e.w / maxE)).toFixed(1);
+    const d = "M" + x1 + "," + y1 + " C" + (x1 + dx) + "," + y1 + " " + (x2 - dx) + "," + y2 + " " + x2 + "," + y2;
+    h += '<path class="gedge' + (back ? " back" : "") + '" data-from="' + e.from + '" data-to="' + e.to + '" d="' + d + '" stroke-width="' + sw + '"/>';
+    if (e.w >= T.total * 0.02 && !back) h += '<text class="g-elabel" x="' + ((x1 + x2) / 2) + '" y="' + ((y1 + y2) / 2 - 4) + '">' + fmtPct(e.w) + "</text>";
+  }
+  const cw = 6.6;
+  for (const { x, y, n } of pos.values()) {
+    const fo = FN[n.fn], isC = n.fn === center, maxC = Math.floor((NW - 16) / cw);
+    const nm = fo.disp.length > maxC ? fo.disp.slice(0, maxC - 1) + "…" : fo.disp;
+    const sub = "total " + fmtPct(T.tot[n.fn]) + " · self " + fmtPct(T.self[n.fn]) + (fo.cat !== "user" ? " · " + CAT_LABEL[fo.cat] : "");
+    const dim = S.match && !S.match[n.fn];
+    h += '<g class="gnode' + (isC ? " center" : "") + (dim ? " dim" : "") + '" data-fn="' + n.fn + '" transform="translate(' + x + "," + y + ')">' +
+      '<rect width="' + NW + '" height="' + NH + '" rx="7" fill="' + fillFor(n.fn) + '"/>' +
+      '<text x="9" y="15" fill="' + (S.color === "heat" ? "#fff" : fo.text) + '" class="g-name">' + esc(nm) + "</text>" +
+      '<text x="9" y="29" class="g-sub">' + esc(sub.length > maxC + 6 ? sub.slice(0, maxC + 5) + "…" : sub) + "</text></g>";
+  }
+  svg.innerHTML = h;
+  if (!edges.length) svg.insertAdjacentHTML("beforeend", '<text class="g-empty" x="' + W / 2 + '" y="' + (H - 30) + '">No calls recorded for this function with the current frame filter.</text>');
+  highlightGraph(S.hoverFn);
+}
+
+function highlightGraph(fn) {
+  const svg = $("#graph");
+  if (svg.hasAttribute("hidden")) return;
+  svg.classList.toggle("hovering", fn >= 0);
+  for (const e of svg.querySelectorAll(".gedge")) e.classList.toggle("hl", fn >= 0 && (+e.dataset.from === fn || +e.dataset.to === fn));
+  for (const g of svg.querySelectorAll(".gnode")) g.classList.toggle("hl", +g.dataset.fn === fn);
+}
+
+function bindGraph() {
+  const svg = $("#graph");
+  svg.addEventListener("mousemove", e => {
+    const g = e.target.closest(".gnode"), p = e.target.closest(".gedge");
+    if (g) {
+      const fn = +g.dataset.fn;
+      if (fn !== S.hoverFn) { setHover(fn); showTip(fnHeader(fn) + grid([["Total", "<b>" + fmtV(T.tot[fn]) + "</b> · " + fmtPct(T.tot[fn])], ["Self", fmtV(T.self[fn]) + " · " + fmtPct(T.self[fn])]]) + '<div class="t-hint">Click to center the graph here and view source</div>', e); }
+      else moveTip(e);
+    } else if (p) {
+      const a = +p.dataset.from, b = +p.dataset.to, ed = (getEdges().out.get(a) || []).find(x => x.to === b);
+      setHover(-1);
+      if (ed) {
+        const site = maxKey(ed.lines);
+        showTip('<div class="t-name">' + esc(FN[a].disp) + " → " + esc(FN[b].disp) + "</div>" + grid([["Time in call", "<b>" + fmtV(ed.w) + "</b> · " + fmtPct(ed.w)], ["Of callee total", fmtPct(ed.w, T.tot[b])]].concat(site ? [["Call site", esc(FN[a].rel) + ":" + site]] : [])) + '<div class="t-hint">Click to open the call site</div>', e);
+      }
+    } else { hideTip(); setHover(-1); }
+  });
+  svg.addEventListener("mouseleave", () => { hideTip(); setHover(-1); });
+  svg.addEventListener("click", e => {
+    const g = e.target.closest(".gnode"), p = e.target.closest(".gedge");
+    hideTip();
+    if (g) select(+g.dataset.fn, 0);
+    else if (p) {
+      const a = +p.dataset.from, b = +p.dataset.to, ed = (getEdges().out.get(a) || []).find(x => x.to === b);
+      if (ed) openSource(a, maxKey(ed.lines));
+    }
+  });
 }
 
 /* ═══════════════════════════ Tooltip ═══════════════════════════ */
@@ -990,6 +1460,21 @@ function tipFor(it) {
     ]) + (users.length ? '<div class="t-stack">' + users.join("") + "</div>" : "") +
       '<div class="t-hint">Click to view source · Double-click to zoom to span</div>';
   }
+  if (it.kind === "phase") {
+    const p = it.phase, path = p.fns.map(f => esc(FN[f].disp)).join(" › ");
+    return (p.fn >= 0 ? fnHeader(p.fn) : '<div class="t-name">(outside your code)</div>') + grid([
+      ["Duration", "<b>" + fmtV(p.wt) + "</b> · " + fmtPct(p.wt)],
+      ["Starts at", fmtAxis(p.x * T.total * (T.timed ? T.scale : 1), 0.01)],
+    ].concat(path ? [["Path", path]] : [])) + '<div class="t-hint">Click to zoom to this phase · Phases tab lists them all</div>';
+  }
+  if (it.kind === "tm") {
+    const n = it.node;
+    if (n.kind === "fn") return fnHeader(n.fn) + grid([["Self", "<b>" + fmtV(n.value) + "</b> · " + fmtPct(n.value)], ["Total", fmtV(T.tot[n.fn]) + " · " + fmtPct(T.tot[n.fn])]]) +
+      '<div class="t-hint">Click to view source · Double-click to zoom into its file</div>';
+    return '<div class="t-name">' + esc(n.name) + '</div><div class="t-loc">' + esc(tmPath(n).join(" / ")) + "</div>" +
+      grid([["Self time", "<b>" + fmtV(n.value) + "</b> · " + fmtPct(n.value)], ["Functions", n.count.toLocaleString()]]) + '<div class="t-hint">Click to zoom in · Esc to go back up</div>';
+  }
+  if (it.kind === "crumb") return '<div class="t-name">' + esc(it.node.name) + '</div><div class="t-hint">Click to go back to this level</div>';
   return "";
 }
 
@@ -1163,7 +1648,7 @@ function renderCalls() {
 
 /* ═══════════════════════════ Source viewer ═══════════════════════════ */
 
-const SRC = { cache: new Map(), file: null, thread: -1, lines: null, rows: null, tok: 0, cur: 0, range: null };
+const SRC = { cache: new Map(), file: null, thread: -1, lines: null, rows: null, tok: 0, cur: 0, range: null, hist: [], pos: -1 };
 
 const PY_KW = new Set(("False None True and as assert async await break class continue def del elif else except finally for from " +
   "global if import in is lambda nonlocal not or pass raise return try while with yield match case type").split(" "));
@@ -1269,9 +1754,64 @@ function setSourcePanel(open) {
 }
 const sourceOpen = () => $("#main").classList.contains("with-side");
 
-async function openSource(fn, line) {
+function pushHistory(fn, line) {
+  const h = SRC.hist, cur = h[SRC.pos];
+  if (cur && cur.fn === fn && cur.line === line) return;
+  h.length = SRC.pos + 1;
+  h.push({ fn, line });
+  if (h.length > 200) h.shift();
+  SRC.pos = h.length - 1;
+  updateHistoryButtons();
+}
+function updateHistoryButtons() {
+  $("#src-back").disabled = SRC.pos <= 0;
+  $("#src-fwd").disabled = SRC.pos >= SRC.hist.length - 1;
+}
+function historyGo(delta) {
+  const i = SRC.pos + delta, e = SRC.hist[i];
+  if (!e || !FN[e.fn]) return;
+  SRC.pos = i;
+  updateHistoryButtons();
+  select(e.fn, e.line, { fromHistory: true });
+}
+
+function lineCallChips(file, ln) {
+  const m = T.lineCallees.get(file), lc = m && m.get(ln);
+  if (!lc) return "";
+  const arr = Array.from(lc).sort((a, b) => b[1] - a[1]);
+  let h = '<span class="ccalls">';
+  for (const [f, wt] of arr.slice(0, 3)) {
+    const fo = FN[f];
+    h += '<button class="cchip" data-fn="' + f + '" title="' + esc("Calls " + fo.disp + (fo.rel ? "  (" + fo.rel + ")" : "") + " · " + fmtV(wt)) + '">' +
+      '<span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + " <em>" + fmtPct(wt) + "</em></button>";
+  }
+  if (arr.length > 3) h += '<button class="cchip more" data-more="' + ln + '">+' + (arr.length - 3) + "</button>";
+  return h + "</span>";
+}
+
+function showCallMenu(btn, ln) {
+  closeCallMenu();
+  const lc = T.lineCallees.get(SRC.file)?.get(ln);
+  if (!lc) return;
+  const menu = document.createElement("div");
+  menu.className = "call-menu"; menu.id = "call-menu";
+  menu.innerHTML = '<div class="call-menu-head">Line ' + ln + " calls</div>" + Array.from(lc).sort((a, b) => b[1] - a[1]).slice(0, 80).map(([f, wt]) => {
+    const fo = FN[f];
+    return '<div class="crow" data-fn="' + f + '"><span class="pct">' + fmtPct(wt) + '</span><span class="time">' + fmtV(wt) + '</span><span class="nm"><span class="dot" style="background:' + fillFor(f) + '"></span>' + esc(fo.disp) + '<span class="loc">' + esc(fo.rel) + "</span></span><span></span></div>";
+  }).join("");
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect(), mr = menu.getBoundingClientRect();
+  menu.style.left = clamp(r.left, 6, innerWidth - mr.width - 6) + "px";
+  menu.style.top = (r.bottom + 4 + mr.height > innerHeight ? Math.max(6, r.top - mr.height - 4) : r.bottom + 4) + "px";
+}
+function closeCallMenu() { const m = $("#call-menu"); if (m) m.remove(); }
+
+async function openSource(fn, line, opts = {}) {
   const fo = FN[fn];
   if (!fo) return;
+  line = line || hotLine(fn) || fo.line;
+  if (!opts.fromHistory) pushHistory(fn, line);
+  closeCallMenu();
   setSourcePanel(true);
   const body = $("#src-body");
   $("#src-fn").textContent = fo.disp;
@@ -1301,7 +1841,7 @@ async function openSource(fn, line) {
     }
     renderSource(fo.file, data);
   }
-  setSourceTarget(line || hotLine(fn) || fo.line);
+  setSourceTarget(line);
 }
 
 function renderSource(file, data) {
@@ -1318,7 +1858,7 @@ function renderSource(file, data) {
       if (p >= 0.5) { cls += " hot"; style = ' style="--h:' + Math.min(0.26, 0.04 + p / 100 * 0.3).toFixed(3) + '"'; }
     }
     const title = e ? ' title="Line ' + ln + ": " + fmtV(e[1]) + " inclusive (" + fmtPct(e[1]) + "), " + fmtV(e[0]) + ' self"' : "";
-    parts[i] = '<div class="' + cls + '"' + style + title + '><span class="no">' + ln + '</span><span class="heat">' + heat + '</span><span class="code">' + (hl[i] || " ") + "</span></div>";
+    parts[i] = '<div class="' + cls + '"' + style + title + '><span class="no">' + ln + '</span><span class="heat">' + heat + '</span><span class="code">' + (hl[i] || " ") + "</span>" + lineCallChips(file, ln) + "</div>";
   }
   const body = $("#src-body");
   body.innerHTML = '<div class="src">' + parts.join("") + "</div>";
@@ -1354,6 +1894,8 @@ function modelForView() {
     case "inverted": return flameModel(true);
     case "timeline": return timelineModel();
     case "tasks": return tasksModel();
+    case "map": return treemapModel();
+    case "graph": return null;
     default: return flameModel(false);
   }
 }
@@ -1362,8 +1904,11 @@ function setView(v, keep) {
   const prev = S.view;
   S.view = v; store.set("view", v);
   $$("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  $(".toolbar").classList.toggle("static-view", v === "map" || v === "graph");
   const timeLike = x => x === "timeline" || x === "tasks";
+  hideTip();
   chart.setModel(modelForView(), keep !== undefined ? keep : (timeLike(prev) && timeLike(v)));
+  renderGraph();
   updateChartInfo();
   if ((prev === "inverted") !== (v === "inverted")) refreshTree(true);
 }
@@ -1374,6 +1919,11 @@ function updateChartInfo() {
   if (S.view === "timeline" || S.view === "tasks") {
     if (T.timed) parts.push("x-axis: sampled time (idle gaps removed)");
     if (S.view === "tasks") parts.push(getTasks().lanes.length + " lanes");
+  } else if (S.view === "map") {
+    parts.push("area = self time · click to zoom in · Esc to go up");
+  } else if (S.view === "graph") {
+    parts.push("edge width = time spent in the call · click a node to recenter");
+    if (S.frames !== "collapse" && S.frames !== "mine") parts.push("tip: Frames → “Collapse libraries” for a cleaner graph");
   } else parts.push("depth " + T.maxDepth);
   $("#chart-info").innerHTML = parts.join(" · ");
   $("#plot-empty").hidden = T.n > 0;
@@ -1399,6 +1949,7 @@ function setHover(fn) {
   S.hoverFn = fn;
   chart.request();
   fnList.restyle();
+  highlightGraph(fn);
 }
 
 function select(fn, line, opts = {}) {
@@ -1412,9 +1963,11 @@ function select(fn, line, opts = {}) {
   treeList.restyle();
   renderCalls();
   updateStatus();
+  renderGraph();
+  if (S.tab === "phases") renderPhases();
   if (S.selFn >= 0) {
     if (opts.reveal !== false) fnList.reveal(fnList.items.indexOf(fn));
-    if (opts.source !== false) openSource(fn, line);
+    if (opts.source !== false) openSource(fn, line, { fromHistory: opts.fromHistory });
   }
 }
 
@@ -1433,6 +1986,7 @@ function setTab(tab) {
   if (tab === "functions") { fnList.request(); refreshFunctions(true); }
   if (tab === "tree") refreshTree(false);
   if (tab === "calls") renderCalls();
+  if (tab === "phases") renderPhases();
 }
 
 function rebuildAll(resetSel) {
@@ -1441,11 +1995,14 @@ function rebuildAll(resetSel) {
   if (S.selFn >= 0 && !(T.tot[S.selFn] > 0)) S.selFn = -1;
   S.hoverFn = -1;
   SRC.thread = -1;
+  TM.focus = null;
   chart.setModel(modelForView(), false);
+  renderGraph();
   updateChartInfo();
   refreshFunctions(false);
   refreshTree(true);
   renderCalls();
+  renderPhases();
   updateStatus();
   if (sourceOpen() && S.selFn >= 0) openSource(S.selFn, SRC.cur || 0);
 }
@@ -1473,10 +2030,14 @@ function bindUI() {
     setHover(it.fn);
     if (same) moveTip(e); else showTip(tipFor(it), e);
   };
+  chart.onResize = () => { if (S.view === "graph") renderGraph(); };
   chart.onClick = it => {
     if (!it) return;
     hideTip();
     if (it.kind === "node" && it.fn < 0) return;
+    if (it.kind === "phase") { chart.zoomToItem(it); if (it.fn >= 0) select(it.fn, 0, { reveal: false }); return; }
+    if (it.kind === "crumb") { setTreemapFocus(it.node); return; }
+    if (it.kind === "tm") { if (it.node.kind === "fn") select(it.fn, 0); else setTreemapFocus(it.node); return; }
     let line = it.line;
     if (it.kind === "block") {
       const b = it.block, m = new Map();
@@ -1499,7 +2060,7 @@ function bindUI() {
   color.addEventListener("change", () => {
     S.color = color.value; store.set("color", S.color);
     $("#legend-module").hidden = S.color !== "module"; $("#legend-heat").hidden = S.color === "module";
-    chart.invalidate(); fnList.paint(); treeList.paint(); renderCalls();
+    chart.invalidate(); fnList.paint(); treeList.paint(); renderCalls(); renderGraph(); renderPhases();
   });
   $("#legend-module").hidden = S.color !== "module"; $("#legend-heat").hidden = S.color === "module";
 
@@ -1507,10 +2068,10 @@ function bindUI() {
   const search = $("#search");
   search.addEventListener("input", () => {
     clearTimeout(st);
-    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); }, 90);
+    st = setTimeout(() => { S.search = search.value; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); }, 90);
   });
   search.addEventListener("keydown", e => {
-    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); search.blur(); e.stopPropagation(); }
+    if (e.key === "Escape") { search.value = ""; S.search = ""; updateSearchMatch(); chart.request(); refreshFunctions(false); renderGraph(); search.blur(); e.stopPropagation(); }
     if (e.key === "Enter") { const f = fnList.items[0]; if (f !== undefined) select(f, 0); }
   });
 
@@ -1577,6 +2138,48 @@ function bindUI() {
     else { setSourcePanel(true); if (!SRC.file) $("#src-body").innerHTML = '<div class="src-msg">Click a function in the graph or tables to see its source with per-line timing.</div>'; }
   });
   $("#src-close").addEventListener("click", () => setSourcePanel(false));
+  $("#src-back").addEventListener("click", () => historyGo(-1));
+  $("#src-fwd").addEventListener("click", () => historyGo(1));
+  updateHistoryButtons();
+  $("#src-body").addEventListener("click", e => {
+    const chip = e.target.closest(".cchip");
+    if (!chip) return;
+    e.stopPropagation();
+    if (chip.dataset.more) showCallMenu(chip, +chip.dataset.more);
+    else select(+chip.dataset.fn, 0);
+  });
+  $("#src-body").addEventListener("mouseover", e => { const c = e.target.closest(".cchip[data-fn]"); setHover(c ? +c.dataset.fn : -1); });
+  $("#src-body").addEventListener("scroll", closeCallMenu, { passive: true });
+  document.addEventListener("click", e => {
+    const menu = $("#call-menu");
+    if (!menu) return;
+    const r = e.target.closest("#call-menu .crow[data-fn]");
+    if (r) { closeCallMenu(); select(+r.dataset.fn, 0); }
+    else if (!e.target.closest("#call-menu")) closeCallMenu();
+  });
+  document.addEventListener("mouseup", e => {
+    if (e.button === 3 || e.button === 4) { e.preventDefault(); historyGo(e.button === 3 ? -1 : 1); }
+  });
+
+  // Phases
+  $("#phases").addEventListener("click", e => {
+    const b = e.target.closest("[data-level]");
+    if (b) {
+      S.phaseLevel = clamp(S.phaseLevel + +b.dataset.level, 1, 8); store.set("phaseLevel", S.phaseLevel);
+      renderPhases(); chart.request();
+      return;
+    }
+    const r = e.target.closest(".prow[data-i]");
+    if (r) focusPhase(computePhases(S.phaseLevel).phases[+r.dataset.i]);
+  });
+  $("#phases").addEventListener("mouseover", e => {
+    const r = e.target.closest(".prow[data-i]");
+    const p = r && computePhases(S.phaseLevel).phases[+r.dataset.i];
+    setHover(p ? p.fn : -1);
+  });
+  $("#phases").addEventListener("mouseleave", () => setHover(-1));
+
+  bindGraph();
   $("#btn-help").addEventListener("click", () => { $("#help").hidden = false; });
   $("#help").addEventListener("click", e => { if (e.target.id === "help" || e.target.closest("[data-close]")) $("#help").hidden = true; });
 
@@ -1624,18 +2227,22 @@ function bindKeys() {
     if (e.key === "Escape") {
       if (!$("#help").hidden) { $("#help").hidden = true; return; }
       if (inInput) { e.target.blur(); return; }
+      if ($("#call-menu")) { closeCallMenu(); return; }
       if (sourceOpen()) { setSourcePanel(false); return; }
+      if (S.view === "map" && TM.focus && TM.focus.parent) { setTreemapFocus(TM.focus.parent); return; }
       if (chart.span < 0.9999) { chart.animateTo(0, 1); return; }
       if (S.selFn >= 0) select(-1);
       return;
     }
+    if (e.altKey && !inInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { e.preventDefault(); historyGo(e.key === "ArrowLeft" ? -1 : 1); return; }
     if (inInput || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     if (k === "/") { e.preventDefault(); $("#search").focus(); $("#search").select(); return; }
     if (k === "?") { $("#help").hidden = !$("#help").hidden; return; }
-    if (k === "1" || k === "2" || k === "3" || k === "4") { setView(["flame", "inverted", "timeline", "tasks"][+k - 1]); return; }
+    if (k >= "1" && k <= "6") { setView(VIEWS[+k - 1]); return; }
     if (k === "s" || k === "S") { $("#btn-source").click(); return; }
     if (e.target.closest(".vlist")) return;
+    if (S.view === "map" || S.view === "graph") return;
     if (k === "+" || k === "=") { chart.zoomCenter(0.5); return; }
     if (k === "-" || k === "_") { chart.zoomCenter(2); return; }
     if (k === "0") { chart.animateTo(0, 1); return; }
@@ -1675,9 +2282,7 @@ async function boot() {
   initThreads();
   bindUI();
   prepareThread();
-  $$("#views button").forEach(b => b.classList.toggle("on", b.dataset.view === S.view));
-  chart.setModel(modelForView(), false);
-  updateChartInfo();
+  setView(S.view, false);
   setTab(S.tab);
   refreshFunctions(false);
   refreshTree(true);
